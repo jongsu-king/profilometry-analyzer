@@ -1,0 +1,32 @@
+{
+  "title": "Profilometry Analyzer",
+  "description": "<p>Reproducible analysis of stylus profilometer line scans (Dektak-compatible CSV/TXT/xlsx exports): robust levelling with the steps masked, step height and film thickness with uncertainty (film edges, ISO 5436-1 type A1 evaluation of grooves and ridges, burr exclusion, periodic lines), ISO 21920-2 roughness parameters with the ISO 16610-21 Gaussian filter, Stoney film stress from curvature, batch tables per sample, a desktop application and a JSON project file that reproduces every number. Not affiliated with Bruker.</p>",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Lim, Jongsu"
+    }
+  ],
+  "keywords": [
+    "stylus profilometry",
+    "step height",
+    "film thickness",
+    "surface roughness",
+    "ISO 21920",
+    "ISO 5436",
+    "Gaussian filter",
+    "Stoney equation",
+    "thin film stress",
+    "Python"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/jongsu-king/profilometry-analyzer",
+      "relation": "isSupplementTo",
+      "resource_type": "software",
+      "scheme": "url"
+    }
+  ]
+}

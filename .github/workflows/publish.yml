@@ -1,0 +1,70 @@
+name: Publish to PyPI
+
+# Builds the wheel and sdist of a release and uploads them to PyPI through trusted
+# publishing (OpenID Connect): no API token is stored anywhere.  The publisher must be
+# registered once on PyPI (project profilometry-analyzer, this repository, workflow
+# publish.yml, environment pypi).  Until then the upload job is skipped on release
+# events; a manual run always tries.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and upload (for example v0.4.1)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and check
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check --strict dist/*
+          ls -l dist
+      - name: Version matches the tag
+        run: |
+          # Read the version from the source file: importing the package would need
+          # its dependencies, which this job does not install.
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION=$(python -c "import re, pathlib; print(re.search(r'^__version__ = \"([^\"]+)\"', pathlib.Path('src/profilometry_analyzer/__init__.py').read_text(), re.M).group(1))")
+          echo "tag $TAG, package $VERSION"
+          test "$TAG" = "v$VERSION"
+          ls dist | grep -F "profilometry_analyzer-$VERSION-" >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Upload to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || vars.PYPI_TRUSTED_PUBLISHER == 'configured'
+    environment:
+      name: pypi
+      url: https://pypi.org/project/profilometry-analyzer/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true

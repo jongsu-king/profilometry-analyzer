@@ -1,0 +1,17 @@
+name: Feature request
+description: A file format, an analysis or a workflow that is missing
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What do you need
+      description: The measurement, the file format (attach a sample if possible) and the result you want.
+    validations:
+      required: true
+  - type: textarea
+    id: reference
+    attributes:
+      label: Reference
+      description: Standard, paper or instrument manual section that defines it.

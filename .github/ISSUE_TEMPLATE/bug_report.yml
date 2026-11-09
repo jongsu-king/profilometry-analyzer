@@ -1,0 +1,47 @@
+name: Bug report
+description: A reader, a step height, roughness, stress, an export or the desktop application did something wrong
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The fastest way to a fix is a project file: run with
+        `--formats json` (or EXPORT in the app) and attach the `.json`, plus the scan file
+        if you can share it.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`profilometry-analyzer --version`, or Help > About in the app"
+      placeholder: "0.1.0 (Windows installer)"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - File reader / units
+        - Levelling
+        - Step height / edges
+        - Roughness
+        - Stress
+        - Batch / export / verify
+        - Desktop application
+        - Installer / packaging
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got (numbers help; the value the instrument software reported, if any).
+    validations:
+      required: true
+  - type: textarea
+    id: notices
+    attributes:
+      label: Notices
+      description: The warnings printed with the result.

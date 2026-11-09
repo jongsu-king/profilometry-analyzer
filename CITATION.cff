@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Profilometry Analyzer"
+abstract: "Reproducible step height, film thickness, ISO 21920-2 roughness and Stoney film stress from stylus profilometer line scans."
+type: software
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/jongsu-king/profilometry-analyzer"
+url: "https://github.com/jongsu-king/profilometry-analyzer"
+authors:
+  - family-names: Lim
+    given-names: Jongsu
+keywords:
+  - stylus profilometry
+  - step height
+  - film thickness
+  - surface roughness
+  - ISO 21920
+  - ISO 5436
+  - Stoney equation
+  - thin film stress

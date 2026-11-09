@@ -1,0 +1,91 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "profilometry-analyzer"
+dynamic = ["version"]
+description = "Reproducible step height, film thickness, roughness and film stress from stylus profilometer scans (Dektak-compatible CSV/TXT/xlsx)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Jongsu Lim" }]
+keywords = [
+  "profilometry",
+  "stylus profilometer",
+  "step height",
+  "film thickness",
+  "surface roughness",
+  "ISO 21920",
+  "ISO 5436",
+  "Stoney equation",
+  "thin film stress",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Physics",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "matplotlib>=3.8",
+  "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-cov>=5",
+  "ruff>=0.6",
+  "mypy>=1.10",
+]
+gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
+
+[project.scripts]
+profilometry-analyzer = "profilometry_analyzer.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jongsu-king/profilometry-analyzer"
+Documentation = "https://github.com/jongsu-king/profilometry-analyzer/tree/main/docs"
+Changelog = "https://github.com/jongsu-king/profilometry-analyzer/blob/main/CHANGELOG.md"
+Source = "https://github.com/jongsu-king/profilometry-analyzer"
+Issues = "https://github.com/jongsu-king/profilometry-analyzer/issues"
+
+[tool.hatch.version]
+path = "src/profilometry_analyzer/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/profilometry_analyzer"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "examples", "docs", "README.md", "LICENSE", "CITATION.cff", "CHANGELOG.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W", "SIM"]
+ignore = ["B905"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["profilometry_analyzer"]
+mypy_path = "src"
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["error::RuntimeWarning:profilometry_analyzer"]

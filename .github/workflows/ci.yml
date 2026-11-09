@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libopengl0 libxkbcommon0 libxcb-cursor0 libdbus-1-3 libfontconfig1
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e ".[dev,gui]"
+      - name: Lint
+        run: ruff check src tests examples packaging && ruff format --check src tests examples packaging
+      - name: Type check
+        run: mypy
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PROFILOMETRY_ANALYZER_NO_UPDATE_CHECK: "1"
+        run: pytest -q --cov=profilometry_analyzer --cov-report=term-missing
+      - name: Smoke test the CLI
+        shell: bash
+        run: |
+          profilometry-analyzer synth --out ci_data
+          profilometry-analyzer step ci_data/filmA_1.csv ci_data/scratch_1.csv --output ci_out --formats csv,json,png
+          profilometry-analyzer roughness ci_data/roughness/sine_A12nm_40um.csv --lc 800 --ls 0 --output ci_out
+          profilometry-analyzer stress --pre ci_data/stress/wafer_pre.csv --post ci_data/stress/wafer_post.csv --hs 525 --hf 500 --output ci_out
+          profilometry-analyzer batch ci_data --output ci_out/batch
+          profilometry-analyzer verify ci_out/filmA_1_step.json ci_out/scratch_1_step.json ci_out/sine_A12nm_40um_roughness.json ci_out/wafer_post_stress.json ci_out/batch/batch.json
+
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine && python -m build && twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

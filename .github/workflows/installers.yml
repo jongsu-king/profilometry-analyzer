@@ -1,0 +1,158 @@
+name: Installers
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the installers to (empty: artifacts only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows x64
+          - os: macos-latest
+            label: macOS arm64
+          - os: ubuntu-24.04
+            label: Linux x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libopengl0 libxkbcommon0 libxcb-cursor0 libdbus-1-3 libfontconfig1
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e ".[gui]" pyinstaller
+      - name: Version
+        id: ver
+        shell: bash
+        run: echo "version=$(python -c 'import profilometry_analyzer; print(profilometry_analyzer.__version__)')" >> "$GITHUB_OUTPUT"
+      - name: Build with PyInstaller
+        run: pyinstaller packaging/profilometry_analyzer.spec --noconfirm --log-level WARN
+
+      # ---- smoke tests of the frozen build (CLI engine + GUI start)
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cli = "dist\Profilometry Analyzer\profilometry-analyzer.exe"
+          & $cli --version
+          & $cli synth --out smoke\data
+          & $cli step "smoke\data\scratch_1.csv" --output smoke\out --formats csv,json,png
+          & $cli verify "smoke\out\scratch_1_step.json"
+          $env:PROFILOMETRY_ANALYZER_SMOKE = "1"
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $p = Start-Process -FilePath "dist\Profilometry Analyzer\Profilometry Analyzer.exe" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "GUI smoke test exited with $($p.ExitCode)" }
+      - name: Smoke test (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          APP="dist/Profilometry Analyzer.app/Contents/MacOS"
+          "$APP/profilometry-analyzer" --version
+          "$APP/profilometry-analyzer" synth --out smoke/data
+          "$APP/profilometry-analyzer" step smoke/data/scratch_1.csv --output smoke/out --formats csv,json,png
+          "$APP/profilometry-analyzer" verify smoke/out/scratch_1_step.json
+          PROFILOMETRY_ANALYZER_SMOKE=1 QT_QPA_PLATFORM=offscreen "$APP/Profilometry Analyzer"
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          APP="dist/Profilometry Analyzer"
+          "$APP/profilometry-analyzer" --version
+          "$APP/profilometry-analyzer" synth --out smoke/data
+          "$APP/profilometry-analyzer" step smoke/data/scratch_1.csv --output smoke/out --formats csv,json,png
+          "$APP/profilometry-analyzer" verify smoke/out/scratch_1_step.json
+          PROFILOMETRY_ANALYZER_SMOKE=1 QT_QPA_PLATFORM=offscreen "$APP/Profilometry Analyzer"
+
+      # ---- packaging
+      - name: "Package (Windows: Inno Setup installer + zip)"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force installers | Out-Null
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$v" "/DSourceDir=$PWD\dist\Profilometry Analyzer" "/DOutputDir=$PWD\installers" packaging\windows_installer.iss
+          Compress-Archive -Path "dist\Profilometry Analyzer" -DestinationPath "installers\Profilometry-Analyzer-$v-Windows-x64.zip" -CompressionLevel Optimal
+          Get-ChildItem installers | ForEach-Object { "$($_.Name) $($_.Length) bytes" }
+      - name: "Package (macOS: DMG)"
+        if: runner.os == 'macOS'
+        run: packaging/build_mac_dmg.sh "${{ steps.ver.outputs.version }}" installers
+      - name: "Package (Linux: deb + tar.gz)"
+        if: runner.os == 'Linux'
+        run: packaging/build_linux_deb.sh "${{ steps.ver.outputs.version }}" installers
+      - name: Install-test the installer (Windows, silent)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $setup = "installers\Profilometry-Analyzer-$v-Windows-x64-Setup.exe"
+          $p = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$PWD\installed" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "installer exited with $($p.ExitCode)" }
+          & "$PWD\installed\profilometry-analyzer.exe" --version
+          $u = Get-ChildItem "$PWD\installed\unins*.exe" | Select-Object -First 1
+          $q = Start-Process -FilePath $u.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -PassThru -Wait
+          if ($q.ExitCode -ne 0) { throw "uninstaller exited with $($q.ExitCode)" }
+      - name: Install-test the deb (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ./installers/profilometry-analyzer_*.deb
+          profilometry-analyzer --version
+          PROFILOMETRY_ANALYZER_SMOKE=1 QT_QPA_PLATFORM=offscreen profilometry-analyzer-gui
+          sudo apt-get remove -y profilometry-analyzer
+      - name: Install-test the DMG (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          DMG=$(ls installers/*.dmg)
+          MNT=$(hdiutil attach "$DMG" -nobrowse -readonly | awk -F'\t' '/\/Volumes\//{print $NF}')
+          "$MNT/Profilometry Analyzer.app/Contents/MacOS/profilometry-analyzer" --version
+          # The volume is briefly busy after the process exits ("Resource busy", exit 16);
+          # the test has already passed at this point, so retry the detach and never fail on it.
+          for i in 1 2 3 4 5 6; do
+            if hdiutil detach "$MNT" -quiet; then break; fi
+            sleep 5
+            [ "$i" = 6 ] && hdiutil detach "$MNT" -force -quiet || true
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: installers/
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag != ''
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all
+      - name: Checksums
+        run: |
+          mkdir -p upload
+          find all -type f ! -name "*.sha256" -exec cp {} upload/ \;
+          cd upload && sha256sum * | tee SHA256SUMS.txt
+      - name: Upload to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+          gh release upload "$TAG" upload/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.size)"'
