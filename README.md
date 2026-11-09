@@ -24,8 +24,8 @@ profilometers (written for a Bruker DektakXT-E) and generic two-column tables.
 | Uncertainty | From the regression residuals (inflated by the integrated autocorrelation time of the residuals) and from the slope difference of the two planes; several scans: mean, standard deviation and n per sample. |
 | Roughness | ISO 21920-2 Ra, Rq, Rz, Rp, Rv, Rt, Rsk, Rku, Rsm after an ISO 16610-21 Gaussian filter (λs and λc); default cut-offs from the ISO 21920-3 setting classes; warnings for coarse sampling and short evaluation lengths. |
 | Film stress | Stoney equation from the curvature of quadratic fits to long scans before and after deposition; substrate table (Si(100), Si(111), glasses) with sources, editable. |
-| Batch | Every scan of a folder, grouped by sample from the file name, thickness mean ± s.d. per sample. |
-| Output | CSV, xlsx, PNG / SVG / PDF figures in an Origin-like style, JSON project file; `verify` repeats the analysis and compares. |
+| Batch | Every scan of a folder, grouped by sample from the file name: n, mean, SD, SE, CV and the 95 % confidence interval of the mean (Student t) per sample; column chart with error bars and the individual scans. |
+| Output | CSV, xlsx, JSON project file (`verify` repeats the analysis and compares), Origin-ready worksheets, and publication figures (PNG / TIFF / SVG / PDF) - see [Figures and worksheets](#figures-and-worksheets). |
 
 ### Warnings
 
@@ -68,6 +68,39 @@ Useful options: `--z-unit nm` / `--x-unit um` when the file does not say;
 region is on the film; `--regions 100:400,600:900` (height of the second region above
 the first); `--edges 512.3` (edge positions instead of detection); `--mode groove`;
 `--bow 2`; `--tip-radius 1.25 --force 2 --soft`.
+
+## Figures and worksheets
+
+Figures follow the look of OriginLab graphs (white canvas, frame on four sides, inward
+major and minor ticks, Arial-type labels, red fits, boxed legend) and are built like
+Origin multi-layer graphs:
+
+- **Step**: (a) profile as read, (b) levelled profile with plane regions, excluded
+  transitions and burrs, plane fits and **dimension lines** with the measured height
+  `h`, depth `d` and width `W`, (c) **residuals of the plane fits** with ±2σ lines.
+- **Roughness**: (a) primary profile and mean line, (b) parameter table, (c) roughness
+  profile with the section boundaries, (d) amplitude distribution, (e) material ratio
+  (Abbott-Firestone) curve.
+- **Stress**: scans and curvature fits, and the fit residuals.
+- **Batch**: column chart of the sample means with SD, SE or 95 % CI error bars, every
+  scan as an open symbol, n above each column.
+
+![Step figure: profile as read, levelled profile with dimension lines, residuals](docs/images/figure_step.png)
+
+![Roughness figure: profiles, parameter table, amplitude distribution, material ratio curve](docs/images/figure_roughness.png)
+
+`--figure-size single|onehalf|double|slide` (85, 120, 174 or 240 mm wide) or
+`--figure-size 100x70` (mm), `--dpi 600`, `--font-size 8`, `--x-display mm`,
+`--z-display Å`, `--no-annotate`, `--no-residuals`, `--error-bar ci95`; `--formats` takes
+`png,tiff,svg,pdf`. Text stays text in SVG and PDF (TrueType embedding), so labels can be
+edited in Illustrator, Inkscape or Origin.
+
+`--formats origin` writes **Origin-ready worksheets** (`*_origin.csv` and `*_origin.xlsx`):
+the first three rows are Long Name, Units and Comments - map them to those header rows
+when importing - followed by the data: position, height as read, levelled height, plane
+fit, fit residual and flags for a step; primary, mean line and roughness profiles, the
+material ratio and amplitude curves and the parameters for roughness; per-sample
+statistics with an SD column for error bars for a batch.
 
 ## Input files
 
@@ -169,11 +202,33 @@ more narrow-feature warnings. A radius in the file or `--tip-radius` takes prece
 
 `profilometry-analyzer gui`: scans grouped by sample on the left, the profile with plane
 regions, fits, burrs and draggable edge lines in the centre, settings for step,
-roughness and stress on the right, result / edges / notices / batch tables below.
-Dragging an edge line or the R and M cursors re-runs the analysis. Jobs run on a worker
-thread. Dark and light themes; Origin-style or instrument-style plot.
+roughness and stress on the right, result / edges / notices / batch / worksheet tabs
+below. Dragging an edge line or the R and M cursors re-runs the analysis. Jobs run on a
+worker thread. Dark and light themes; Origin-style or instrument-style plot.
 
-![Cursor measurement and batch table](docs/images/gui_cursors_batch.png)
+Working like a graphing program:
+
+- **Plot Details** (double-click the graph, or *View > Plot details…*, Ctrl+D): x unit
+  (µm, mm), height unit (auto, Å, nm, µm), axis limits, font size, line width, legend,
+  dimension lines, residual layer, offset between overlaid scans. Positions passed to
+  the analysis stay in µm whatever the display unit.
+- **Residual layer** under the profile, sharing the x axis, and **dimension lines** with
+  h, d and W on the graph.
+- **Data reader**: the cross snaps to the nearest data point and the status bar shows its
+  x and z; **Shift-click** two points A and B to read Δx and Δz (manual check of a step).
+- **OVERLAY**: the selected scans - or all scans of the current sample - in one graph,
+  optionally offset (Origin's "Offset Y").
+- **WORKSHEET** tab: the data behind the graph in an Origin-style sheet (`A(X)`,
+  `B(Y)`… with Long Name / Units / Comments rows); Ctrl+C copies the selection, *Edit >
+  Copy worksheet* the whole sheet, ready to paste into Origin or Excel.
+- **BATCH** tab: the sample table (n, mean, SD, SE, 95 % CI, CV) next to a column chart.
+- **FIGURE**: publication figure with a journal size preset, dpi, font size and
+  PNG / TIFF / SVG / PDF; *Edit > Copy graph* (Ctrl+Shift+C) puts the live graph on the
+  clipboard.
+
+![Cursor measurement, residual layer, Shift-click A/B reading and batch chart](docs/images/gui_cursors_batch.png)
+
+![Overlay of nine scans in mm and the Origin-style worksheet](docs/images/gui_overlay_worksheet.png)
 
 ## Citation
 

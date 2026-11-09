@@ -8,15 +8,19 @@ on a :class:`~.workers.JobRunner` thread; results come back to the GUI thread.
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor
+from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDockWidget,
@@ -31,6 +35,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -55,13 +60,18 @@ from ..analysis import (
 from ..batch import BatchResult, run_batch, sample_name
 from ..core.roughness import SETTING_CLASSES, RoughnessSettings
 from ..core.stress import SUBSTRATES, StressSettings
+from ..export import origin as O
+from ..export.plots import FigureOptions
 from ..instrument import DEFAULT_INSTRUMENT
 from ..notices import Notice
 from ..profile import Profile
 from ..readers import SUPPORTED_SUFFIXES, ReadError, read_profile
 from . import theme as T
-from .plot_widget import ProfilePlot
+from .dialogs import ExportFigureDialog, PlotDetailsDialog
+from .graph_options import GraphOptions
+from .plot_widget import BatchChart, ProfilePlot
 from .workers import JobRunner
+from .worksheet import WorksheetView
 
 ORG, APP = "profilometry-analyzer", "desktop"
 SEVERITY_COLOR = {"info": "#5a8fd8", "warning": "#e0a000", "error": "#d03b3b"}
@@ -107,10 +117,17 @@ class MainWindow(QMainWindow):
         self.stress_result: StressAnalysis | None = None
         self._last_view = "step"
 
-        self.plot = ProfilePlot(self, T.plot_style(str(self.settings.value("ui/plot", "origin"))))
+        self.plot = ProfilePlot(
+            self,
+            T.plot_style(str(self.settings.value("ui/plot", "origin"))),
+            GraphOptions.from_json(self.settings.value("ui/graph", "")),
+        )
         self.plot.regionsEdited.connect(self._cursors_moved)
         self.plot.edgesEdited.connect(self._edges_moved)
         self.plot.cursorMoved.connect(self._cursor_readout)
+        self.plot.pointsMeasured.connect(self._points_measured)
+        self.plot.detailsRequested.connect(self.plot_details)
+        self.fig_options, self.fig_formats, self.fig_style, self.fig_preset = self._load_figure()
         self.setCentralWidget(self.plot)
         self._build_toolbar()
         self._build_menu()
@@ -119,11 +136,14 @@ class MainWindow(QMainWindow):
         self._build_results_dock()
         self.cursor_label = QLabel("")
         self.cursor_label.setObjectName("cursor")
+        self.measure_label = QLabel("")
+        self.measure_label.setObjectName("cursor")
         self.status_label = QLabel("")
         self.update_label = QLabel("")
         self.update_label.setObjectName("update")
         self.statusBar().addWidget(self.status_label, 1)
         self.statusBar().addPermanentWidget(self.update_label)
+        self.statusBar().addPermanentWidget(self.measure_label)
         self.statusBar().addPermanentWidget(self.cursor_label)
         self._set_status("idle", "open a scan (CSV, TXT or xlsx export)")
         want_updates = check_updates
@@ -162,17 +182,26 @@ class MainWindow(QMainWindow):
         add("STEP ALL", self.analyze_all, "step height of every scan and the sample table")
         add("ROUGHNESS", self.roughness_current, "ISO 21920-2 roughness of the selected scan")
         add("STRESS", self.stress_run, "Stoney stress from the before/after scans")
+        add("OVERLAY", self.overlay, "overlay the selected scans (or the scans of the sample)")
         tb.addSeparator()
         add("EXPORT", self.export, "tables, figures and project file of the shown result")
+        add("FIGURE", self.export_figure, "publication figure: journal size, dpi, TIFF/SVG/PDF")
 
     def _build_menu(self) -> None:
         mb = self.menuBar()
         m = mb.addMenu("&File")
         m.addAction("Open scans…", self.open_files)
         m.addAction("Open folder…", self.open_folder)
-        m.addAction("Export…", self.export)
+        m.addAction("Export results…", self.export)
+        m.addAction("Export figure…", self.export_figure)
+        m.addAction("Export Origin worksheet…", self.export_worksheet)
         m.addSeparator()
         m.addAction("Quit", self.close)
+        e = mb.addMenu("&Edit")
+        act = e.addAction("Copy graph", self.copy_graph)
+        act.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        e.addAction("Copy worksheet (Long Name / Units / Comments + data)", self.copy_worksheet)
+        e.addAction("Clear A/B markers", self.plot.clear_measure)
         v = mb.addMenu("&View")
         for name in T.THEMES:
             v.addAction(f"{name.title()} theme", partial(self.set_theme, name))
@@ -182,6 +211,16 @@ class MainWindow(QMainWindow):
         self.act_raw = QAction("Show profile as read", self, checkable=True, checked=True)
         self.act_raw.toggled.connect(self._toggle_raw)
         v.addAction(self.act_raw)
+        o = self.plot.opts
+        self.act_resid = QAction("Residual layer", self, checkable=True, checked=o.show_residuals)
+        self.act_resid.toggled.connect(lambda on: self._toggle_option("show_residuals", on))
+        self.act_dims = QAction("Dimension lines", self, checkable=True, checked=o.show_annotations)
+        self.act_dims.toggled.connect(lambda on: self._toggle_option("show_annotations", on))
+        v.addAction(self.act_resid)
+        v.addAction(self.act_dims)
+        v.addSeparator()
+        act = v.addAction("Plot details…", self.plot_details)
+        act.setShortcut(QKeySequence("Ctrl+D"))
         h = mb.addMenu("&Help")
         self.act_updates = QAction("Check for updates at startup", self, checkable=True)
         self.act_updates.setChecked(bool(self.settings.value("updates/check", True, type=bool)))
@@ -197,6 +236,7 @@ class MainWindow(QMainWindow):
         self.tree.setHeaderLabels(["scan", "thickness (nm)", "status"])
         self.tree.setColumnWidth(0, 150)
         self.tree.setColumnWidth(1, 140)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.itemSelectionChanged.connect(self._selection_changed)
         dock.setWidget(self.tree)
         dock.setMinimumWidth(360)
@@ -341,10 +381,18 @@ class MainWindow(QMainWindow):
         self.lst_notices = QListWidget()
         self.lst_notices.setWordWrap(True)
         self.tbl_batch = QTableWidget(0, 0)
+        self.batch_chart = BatchChart(self, self.plot.look)
+        self.batch_split = QSplitter(Qt.Orientation.Horizontal)
+        self.batch_split.addWidget(self.tbl_batch)
+        self.batch_split.addWidget(self.batch_chart)
+        self.batch_split.setSizes([700, 420])
+        self.worksheet = WorksheetView(self)
+        self.worksheet.set_header_color(T.current().panel_raised)
         self.result_tabs.addTab(self.tbl_result, "RESULT")
         self.result_tabs.addTab(self.tbl_edges, "EDGES")
         self.result_tabs.addTab(self.lst_notices, "NOTICES")
-        self.result_tabs.addTab(self.tbl_batch, "BATCH")
+        self.result_tabs.addTab(self.batch_split, "BATCH")
+        self.result_tabs.addTab(self.worksheet, "WORKSHEET")
         dock.setWidget(self.result_tabs)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
 
@@ -355,7 +403,16 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"<span style='color:{color}'>●</span> <b>{word}</b>  {text}")
 
     def _cursor_readout(self, x: float, z: float) -> None:
-        self.cursor_label.setText(f"x = {x:.4g} µm   z = {z:.4g} nm")
+        self.cursor_label.setText(self.plot.format_point(x, z))
+
+    def _points_measured(self, info: dict[str, Any]) -> None:
+        p = self.plot
+        dx = info["dx_um"] * p.opts.sx
+        dz_scale = p.opts.z_factor(abs(info["dz_nm"]) if p.opts.z_unit == "auto" else 0.0)
+        self.measure_label.setText(
+            f"A→B  Δx = {dx:.5g} {p.opts.x_unit}   Δz = {info['dz_nm'] * dz_scale[0]:.5g}"
+            f" {dz_scale[1]}"
+        )
 
     # ------------------------------------------------------------------ files
     def open_files(self) -> None:
@@ -603,7 +660,8 @@ class MainWindow(QMainWindow):
                     sc.status = "failed"
             self._rebuild_tree()
             self._fill_batch(res)
-            self.result_tabs.setCurrentWidget(self.tbl_batch)
+            self.batch_chart.show_batch(res, self.fig_options.error_bar)
+            self.result_tabs.setCurrentWidget(self.batch_split)
             if self.current and self.scans[self.current].step:
                 self._show_step(self.scans[self.current].step)  # type: ignore[arg-type]
             self._set_status("ok", f"{len(res.items)} scans, {len(res.samples)} samples")
@@ -638,6 +696,7 @@ class MainWindow(QMainWindow):
             ]
             self._fill_result(rows)
             self._fill_notices(res.notices)
+            self.worksheet.set_columns(O.roughness_worksheet(res), sc.path.name)
             self._set_status(N.worst(res.notices), f"Ra = {r.parameters['Ra']:.4g} nm")
 
         self.jobs.queue(job, done, self._job_failed, f"roughness: {sc.path.name}")
@@ -671,6 +730,7 @@ class MainWindow(QMainWindow):
             ]
             self._fill_result(rows)
             self._fill_notices(res.notices)
+            self.worksheet.set_columns(O.stress_worksheet(res), "stress")
             self._set_status(N.worst(res.notices), rows[0][1])
 
         self.jobs.queue(job, done, self._job_failed, "stress")
@@ -735,6 +795,7 @@ class MainWindow(QMainWindow):
         self._fill_result(rows)
         self._fill_edges(m.per_edge)
         self._fill_notices(res.notices)
+        self.worksheet.set_columns(O.step_worksheet(res), res.source.name)
 
     def _fill_result(self, rows: list[tuple[str, str]]) -> None:
         t = self.tbl_result
@@ -782,6 +843,8 @@ class MainWindow(QMainWindow):
                 "thickness_mean_nm",
                 "thickness_std_nm",
                 "thickness_sem_nm",
+                "thickness_ci95_nm",
+                "thickness_cv_percent",
                 "mean_single_scan_u_nm",
                 "kinds",
                 "warnings",
@@ -815,13 +878,28 @@ class MainWindow(QMainWindow):
             stem = out / f"{sc.path.stem}_roughness"
             written.append(write_csv(stem.with_suffix(".csv"), [res.row()]))
             written.append(save_project(res, stem.with_suffix(".json")))
-            fig = plots.plot_roughness(res, title=sc.path.name)
+            written.append(
+                O.write_origin_xlsx(
+                    stem.with_name(stem.name + "_origin.xlsx"),
+                    {
+                        "Profile": O.roughness_worksheet(res),
+                        "Curves": O.roughness_curves_worksheet(res),
+                        "Parameters": O.roughness_parameters_worksheet(res),
+                    },
+                )
+            )
+            fig = plots.plot_roughness(res, title=sc.path.name, options=self._figure_options())
         elif self._last_view == "stress" and self.stress_result:
             res2 = self.stress_result
             stem = out / "stress"
             written.append(write_csv(stem.with_suffix(".csv"), [res2.row()]))
             written.append(save_project(res2, stem.with_suffix(".json")))
-            fig = plots.plot_stress(res2, title="stress")
+            written.append(
+                O.write_origin_xlsx(
+                    stem.with_name(stem.name + "_origin.xlsx"), {"Scans": O.stress_worksheet(res2)}
+                )
+            )
+            fig = plots.plot_stress(res2, title="stress", options=self._figure_options(stress=True))
         elif sc and sc.step:
             res3 = sc.step
             stem = out / f"{sc.path.stem}_step"
@@ -838,7 +916,17 @@ class MainWindow(QMainWindow):
                 )
             )
             written.append(save_project(res3, stem.with_suffix(".json"), DEFAULT_INSTRUMENT))
-            fig = plots.plot_step(res3, title=sc.path.name)
+            written.append(
+                O.write_origin_xlsx(
+                    stem.with_name(stem.name + "_origin.xlsx"),
+                    {
+                        "Profile": O.step_worksheet(res3),
+                        "Edges": O.step_edges_worksheet(res3),
+                        "Residuals": O.plane_residual_worksheet(res3),
+                    },
+                )
+            )
+            fig = plots.plot_step(res3, title=sc.path.name, options=self._figure_options())
         else:
             self._set_status("idle", "nothing to export yet")
             return []
@@ -850,6 +938,20 @@ class MainWindow(QMainWindow):
             written.append(write_csv(out / "batch_samples.csv", self.batch.sample_rows()))
             written.append(write_csv(out / "batch_scans.csv", self.batch.scan_rows()))
             written.append(save_project(self.batch, out / "batch.json", DEFAULT_INSTRUMENT))
+            written.append(
+                O.write_origin_xlsx(
+                    out / "batch_origin.xlsx",
+                    {
+                        "Samples": O.batch_worksheet(self.batch),
+                        "Scans": O.batch_scans_worksheet(self.batch),
+                    },
+                )
+            )
+            fig = plots.plot_batch(self.batch, options=self._figure_options())
+            try:
+                written += plots.save(fig, out / "batch_samples", ["png", "svg"])
+            finally:
+                plots.close(fig)
         self._set_status("ok", f"wrote {len(written)} files to {out}")
         return written
 
@@ -861,17 +963,197 @@ class MainWindow(QMainWindow):
         if isinstance(app, QApplication):
             theme = T.apply_theme(app, name)
             self.settings.setValue("ui/theme", theme.name)
+            self.worksheet.set_header_color(theme.panel_raised)
             if self.plot.look.name == "instrument":
                 self.plot.set_style(T.plot_style("instrument", theme))
+                self.batch_chart.set_style(self.plot.look)
 
     def set_plot_style(self, name: str) -> None:
         self.plot.set_style(T.plot_style(name))
+        self.batch_chart.set_style(self.plot.look)
         self.settings.setValue("ui/plot", name)
 
     def _toggle_raw(self, on: bool) -> None:
         self.plot.show_raw = on
         if self.current and self.scans[self.current].step:
             self._show_step(self.scans[self.current].step)  # type: ignore[arg-type]
+
+    # ------------------------------------------------------------------ graph
+    def set_graph_options(self, opts: GraphOptions) -> None:
+        self.plot.set_options(opts)
+        self.settings.setValue("ui/graph", opts.to_json())
+        for act, on in (
+            (self.act_resid, opts.show_residuals),
+            (self.act_dims, opts.show_annotations),
+        ):
+            act.blockSignals(True)
+            act.setChecked(on)
+            act.blockSignals(False)
+
+    def _toggle_option(self, name: str, on: bool) -> None:
+        self.set_graph_options(self.plot.opts.with_changes(**{name: on}))
+
+    def plot_details(self) -> None:
+        dlg = PlotDetailsDialog(self.plot.opts, self)
+        dlg.applied.connect(self.set_graph_options)
+        dlg.exec()
+
+    def copy_graph(self) -> QPixmap:
+        """The live graph as an image on the clipboard (paste into slides or reports)."""
+        pix = self.plot.grab()
+        QApplication.clipboard().setPixmap(pix)
+        self._set_status("ok", "graph copied to the clipboard")
+        return pix
+
+    def copy_worksheet(self) -> str:
+        text = self.worksheet.sheet.as_tsv()
+        QApplication.clipboard().setText(text)
+        self._set_status("ok", "worksheet copied (paste into Origin or Excel)")
+        return text
+
+    def _selected_keys(self) -> list[str]:
+        keys = []
+        for item in self.tree.selectedItems():
+            key = item.data(0, Qt.ItemDataRole.UserRole)
+            if key:
+                keys.append(str(key))
+        return keys
+
+    def overlay(self, keys: list[str] | None = None) -> None:
+        """Selected scans (or every scan of the current sample) in one graph."""
+        if keys is None:
+            keys = self._selected_keys()
+            if len(keys) < 2 and self.current:
+                sample = self.scans[self.current].sample
+                keys = [k for k, sc in self.scans.items() if sc.sample == sample]
+        keys = [k for k in keys if k in self.scans]
+        if not keys:
+            self._set_status("idle", "open scans first")
+            return
+        curves = []
+        for k in keys:
+            sc = self.scans[k]
+            if sc.step is not None:
+                p = sc.step.profile
+                z = np.where(p.valid, p.z_nm, np.nan)
+                curves.append((sc.path.stem, p.x_um, z))
+            else:
+                p = sc.profile
+                z = np.where(p.valid, p.z_nm, np.nan)
+                curves.append((sc.path.stem, p.x_um, z - float(np.nanmedian(z))))
+        self._last_view = "overlay"
+        self.plot.show_overlay(curves)
+        self._set_status("ok", f"overlay of {len(curves)} scans (levelled where analysed)")
+
+    # ------------------------------------------------------------------ figures
+    def _load_figure(self) -> tuple[FigureOptions, list[str], str, str]:
+        try:
+            data = json.loads(str(self.settings.value("ui/figure", "") or "{}"))
+            opts = FigureOptions(**data.get("options", {}))
+            formats = [str(f) for f in data.get("formats", ["png", "svg"])]
+            return (
+                opts,
+                formats,
+                str(data.get("style", "origin")),
+                str(data.get("preset", "double")),
+            )
+        except (ValueError, TypeError):
+            return FigureOptions(), ["png", "svg"], "origin", "double"
+
+    def _save_figure_settings(self) -> None:
+        data = {
+            "options": asdict(self.fig_options),
+            "formats": self.fig_formats,
+            "style": self.fig_style,
+            "preset": self.fig_preset,
+        }
+        self.settings.setValue("ui/figure", json.dumps(data, ensure_ascii=False))
+
+    def _figure_options(self, stress: bool = False) -> FigureOptions:
+        """Figure options with the axis units of the live graph."""
+        from dataclasses import replace
+
+        g = self.plot.opts
+        x_unit, z_unit = g.x_unit, g.z_unit
+        if stress and g.x_unit == "µm" and g.z_unit == "auto":
+            x_unit, z_unit = "mm", "µm"
+        return replace(self.fig_options, x_unit=x_unit, z_unit=z_unit)
+
+    def export_figure(
+        self,
+        folder: str | None = None,
+        options: FigureOptions | None = None,
+        formats: list[str] | None = None,
+        style: str | None = None,
+    ) -> list[Path]:
+        """Publication figure of the shown result (and of the batch, if there is one)."""
+        from ..export import plots
+
+        if options is None:
+            dlg = ExportFigureDialog(
+                self.fig_options, self.fig_formats, self.fig_style, self.fig_preset, self
+            )
+            if dlg.exec() != ExportFigureDialog.DialogCode.Accepted:
+                return []
+            options, formats, style = dlg.result_options()
+            self.fig_options, self.fig_formats, self.fig_style = options, formats, style
+            self.fig_preset = dlg.preset()
+            self._save_figure_settings()
+        if folder is None:
+            folder = QFileDialog.getExistingDirectory(self, "Save figures to folder")
+        if not folder:
+            return []
+        self.fig_options = options
+        formats = formats or self.fig_formats
+        style = style or self.fig_style
+        out = Path(folder)
+        sc = self.scans.get(self.current or "")
+        jobs: list[tuple[Any, Path]] = []
+        if self._last_view == "roughness" and sc and sc.roughness:
+            fig = plots.plot_roughness(
+                sc.roughness, title=sc.path.name, style=style, options=self._figure_options()
+            )
+            jobs.append((fig, out / f"{sc.path.stem}_roughness"))
+        elif self._last_view == "stress" and self.stress_result:
+            fig = plots.plot_stress(
+                self.stress_result, title="stress", style=style, options=self._figure_options(True)
+            )
+            jobs.append((fig, out / "stress"))
+        elif sc and sc.step:
+            fig = plots.plot_step(
+                sc.step, title=sc.path.name, style=style, options=self._figure_options()
+            )
+            jobs.append((fig, out / f"{sc.path.stem}_step"))
+        if self.batch is not None:
+            fig = plots.plot_batch(self.batch, style=style, options=self._figure_options())
+            jobs.append((fig, out / "batch_samples"))
+        if not jobs:
+            self._set_status("idle", "nothing to draw yet")
+            return []
+        written: list[Path] = []
+        for fig, stem in jobs:
+            try:
+                written += plots.save(fig, stem, formats)
+            finally:
+                plots.close(fig)
+        self._set_status("ok", f"wrote {len(written)} figure file(s) to {out}")
+        return written
+
+    def export_worksheet(self, path: str | None = None) -> Path | None:
+        """The worksheet shown in the WORKSHEET tab as an Origin-ready CSV."""
+        cols = self.worksheet.sheet.columns
+        if not cols:
+            self._set_status("idle", "no worksheet yet: analyse a scan first")
+            return None
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export worksheet", "worksheet_origin.csv", "CSV (*.csv)"
+            )
+        if not path:
+            return None
+        p = O.write_origin_csv(path, cols)
+        self._set_status("ok", f"wrote {p}")
+        return p
 
     def _about(self) -> None:
         QMessageBox.about(

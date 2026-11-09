@@ -337,3 +337,50 @@ def runs(mask: np.ndarray) -> list[tuple[int, int]]:
     starts = np.flatnonzero(d == 1)
     stops = np.flatnonzero(d == -1)
     return list(zip(starts.tolist(), stops.tolist()))
+
+
+def describe(values: Any, confidence: float = 0.95) -> dict[str, float | int | None]:
+    """Descriptive statistics of repeated measurements (Origin's "Descriptive
+    Statistics" set): n, mean, sample standard deviation (n - 1), standard error,
+    coefficient of variation in %, half-width of the two-sided confidence interval of
+    the mean from Student's t, median, minimum and maximum.
+
+    With one value only n, mean, median, min and max are defined; the spread entries are
+    ``None``.
+    """
+    from scipy import stats as sps
+
+    v = np.asarray([float(x) for x in values if x is not None], dtype=float)
+    v = v[np.isfinite(v)]
+    n = int(v.size)
+    out: dict[str, float | int | None] = {
+        "n": n,
+        "mean": None,
+        "sd": None,
+        "se": None,
+        "cv_percent": None,
+        "ci_half": None,
+        "ci_low": None,
+        "ci_high": None,
+        "median": None,
+        "min": None,
+        "max": None,
+        "confidence": confidence,
+    }
+    if n == 0:
+        return out
+    mean = float(np.mean(v))
+    out.update(mean=mean, median=float(np.median(v)), min=float(v.min()), max=float(v.max()))
+    if n > 1:
+        sd = float(np.std(v, ddof=1))
+        se = sd / np.sqrt(n)
+        half = float(sps.t.ppf(0.5 + confidence / 2.0, n - 1) * se)
+        out.update(
+            sd=sd,
+            se=float(se),
+            cv_percent=float(100.0 * sd / abs(mean)) if mean != 0 else None,
+            ci_half=half,
+            ci_low=mean - half,
+            ci_high=mean + half,
+        )
+    return out

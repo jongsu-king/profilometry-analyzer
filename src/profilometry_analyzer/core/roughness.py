@@ -152,6 +152,43 @@ class RoughnessResult:
         }
 
 
+# ---------------------------------------------------------------- distributions
+def material_ratio_curve(r: np.ndarray, n_points: int = 501) -> tuple[np.ndarray, np.ndarray]:
+    """Material ratio (Abbott-Firestone) curve of a roughness profile.
+
+    Returns ``(mr_percent, c_nm)``: at height ``c`` the fraction of the evaluated points
+    at or above ``c``, from 0 % at the highest peak to 100 % at the deepest valley.
+    Uniform sampling is assumed, so the fraction of points equals the fraction of the
+    evaluation length.  No material-ratio parameter (Rmr, Rdc) is derived from it here.
+    """
+    v = np.sort(np.asarray(r, dtype=float)[np.isfinite(r)])[::-1]
+    if v.size == 0:
+        return np.array([]), np.array([])
+    mr = (np.arange(v.size) + 0.5) / v.size * 100.0
+    if v.size > n_points:
+        idx = np.unique(np.linspace(0, v.size - 1, n_points).round().astype(int))
+        mr, v = mr[idx], v[idx]
+    return np.concatenate([[0.0], mr, [100.0]]), np.concatenate([[v[0]], v, [v[-1]]])
+
+
+def amplitude_distribution(r: np.ndarray, bins: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Amplitude density of a roughness profile: ``(height_nm, density_per_nm)``.
+
+    The bin width follows the Freedman-Diaconis rule (between 10 and 200 bins); the
+    density integrates to one.
+    """
+    v = np.asarray(r, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size < 2 or np.ptp(v) == 0:
+        return np.array([]), np.array([])
+    if bins is None:
+        q75, q25 = np.percentile(v, [75, 25])
+        width = 2.0 * (q75 - q25) / np.cbrt(v.size)
+        bins = int(np.clip(np.ceil(np.ptp(v) / width), 10, 200)) if width > 0 else 50
+    dens, edges = np.histogram(v, bins=bins, density=True)
+    return 0.5 * (edges[:-1] + edges[1:]), dens
+
+
 # ---------------------------------------------------------------- parameters
 def amplitude_parameters(r: np.ndarray) -> dict[str, float]:
     r = np.asarray(r, dtype=float)

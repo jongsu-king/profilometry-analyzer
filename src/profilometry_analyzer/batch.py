@@ -20,6 +20,7 @@ import numpy as np
 
 from . import notices as N
 from .analysis import StepResult, StepSettings, analyze_step
+from .core.stats import describe
 from .instrument import DEFAULT_INSTRUMENT, InstrumentSpec
 from .readers import SUPPORTED_SUFFIXES, read_profile
 
@@ -83,6 +84,11 @@ class SampleSummary:
     mean_u_nm: float | None
     kinds: list[str]
     warnings: list[str] = field(default_factory=list)
+    cv_percent: float | None = None
+    """Coefficient of variation, SD / mean in %."""
+    ci95_nm: float | None = None
+    """Half-width of the 95 % confidence interval of the mean (Student t, n - 1)."""
+    median_nm: float | None = None
 
     def row(self) -> dict[str, Any]:
         return {
@@ -92,6 +98,9 @@ class SampleSummary:
             "thickness_mean_nm": self.mean_nm,
             "thickness_std_nm": self.std_nm,
             "thickness_sem_nm": self.sem_nm,
+            "thickness_ci95_nm": self.ci95_nm,
+            "thickness_cv_percent": self.cv_percent,
+            "thickness_median_nm": self.median_nm,
             "thickness_min_nm": self.min_nm,
             "thickness_max_nm": self.max_nm,
             "mean_single_scan_u_nm": self.mean_u_nm,
@@ -126,6 +135,10 @@ class BatchResult:
         return out
 
 
+def _opt(v: float | int | None) -> float | None:
+    return None if v is None else float(v)
+
+
 def summarize(items: list[BatchItem]) -> list[SampleSummary]:
     groups: dict[str, list[BatchItem]] = {}
     for it in items:
@@ -140,6 +153,7 @@ def summarize(items: list[BatchItem]) -> list[SampleSummary]:
             assert i.result is not None
             warn += [n.code for n in i.result.notices if n.severity in (N.WARNING, N.ERROR)]
         kinds = sorted({i.result.measurement.kind for i in its if i.result is not None})
+        d = describe(t)
         out.append(
             SampleSummary(
                 sample=name,
@@ -153,6 +167,9 @@ def summarize(items: list[BatchItem]) -> list[SampleSummary]:
                 mean_u_nm=float(np.mean(u)) if u else None,
                 kinds=kinds,
                 warnings=list(dict.fromkeys(warn)),
+                cv_percent=_opt(d["cv_percent"]),
+                ci95_nm=_opt(d["ci_half"]),
+                median_nm=_opt(d["median"]),
             )
         )
     return out

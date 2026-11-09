@@ -25,7 +25,7 @@ from .instrument import DEFAULT_INSTRUMENT
 from .notices import Notice
 from .readers import ReadError, read_profile
 
-FIG_FORMATS = ("png", "svg", "pdf")
+FIG_FORMATS = ("png", "tiff", "svg", "pdf")
 
 
 # ------------------------------------------------------------------ parsing helpers
@@ -47,7 +47,8 @@ def _floats(text: str) -> list[float]:
 
 def _formats(text: str) -> list[str]:
     out = [t.strip().lower() for t in text.split(",") if t.strip()]
-    allowed = {"csv", "xlsx", "json", *FIG_FORMATS}
+    out = ["tiff" if t == "tif" else t for t in out]
+    allowed = {"csv", "xlsx", "json", "origin", *FIG_FORMATS}
     bad = [t for t in out if t not in allowed]
     if bad:
         raise argparse.ArgumentTypeError(f"unknown format(s) {bad}; use {sorted(allowed)}")
@@ -145,9 +146,27 @@ def _add_output(p: argparse.ArgumentParser, default: str = "csv,json,png") -> No
         "--formats",
         type=_formats,
         default=_formats(default),
-        help=f"comma list of csv,xlsx,json,png,svg,pdf (default {default})",
+        help=f"comma list of csv,xlsx,json,origin,png,tiff,svg,pdf (default {default});"
+        " origin = worksheets with Long Name / Units / Comments rows (CSV + xlsx)",
     )
     g.add_argument("--style", choices=("origin", "classic"), default="origin")
+    f = p.add_argument_group("figures")
+    f.add_argument(
+        "--figure-size",
+        metavar="SIZE",
+        help="single, onehalf, double, slide or WIDTHxHEIGHT in mm (default: own size)",
+    )
+    f.add_argument("--dpi", type=int, default=300, help="raster resolution (default 300)")
+    f.add_argument("--font-size", type=float, metavar="PT", help="label font size in points")
+    f.add_argument("--x-display", choices=("µm", "um", "mm"), help="x axis unit of the figures")
+    f.add_argument(
+        "--z-display", choices=("auto", "Å", "A", "nm", "µm", "um"), help="height axis unit"
+    )
+    f.add_argument("--no-annotate", action="store_true", help="no dimension lines")
+    f.add_argument("--no-residuals", action="store_true", help="no residual layer")
+    f.add_argument(
+        "--error-bar", choices=("sd", "se", "ci95"), default="sd", help="batch chart error bars"
+    )
     g.add_argument("--json", action="store_true", help="print the result as JSON")
 
 
@@ -164,15 +183,51 @@ def _fmt(v: Any, nd: int = 4) -> str:
     return str(v)
 
 
+def _fig_options(a: argparse.Namespace, stress: bool = False) -> Any:
+    from .export import plots
+
+    xu = {"um": "µm"}.get(a.x_display, a.x_display) if a.x_display else None
+    zu = {"um": "µm", "A": "Å"}.get(a.z_display, a.z_display) if a.z_display else None
+    if stress:
+        xu, zu = xu or "mm", zu or "µm"
+    return plots.figure_options(
+        a.figure_size,
+        dpi=a.dpi,
+        font_pt=a.font_size,
+        x_unit=xu,
+        z_unit=zu,
+        annotate=not a.no_annotate,
+        residuals=not a.no_residuals,
+        error_bar=a.error_bar,
+    )
+
+
+def _origin(stem: Path, sheets: dict[str, Any], formats: list[str]) -> None:
+    if "origin" not in formats:
+        return
+    from .export.origin import write_origin_csv, write_origin_xlsx
+
+    sheets = {k: v for k, v in sheets.items() if v}
+    first = next(iter(sheets.values()))
+    print(f"  wrote {write_origin_csv(stem.with_name(stem.name + '_origin.csv'), first)}")
+    print(f"  wrote {write_origin_xlsx(stem.with_name(stem.name + '_origin.xlsx'), sheets)}")
+
+
 def _figures(
-    fig_func: Any, obj: Any, stem: Path, formats: list[str], style: str, title: str
+    fig_func: Any,
+    obj: Any,
+    stem: Path,
+    formats: list[str],
+    style: str,
+    title: str,
+    options: Any = None,
 ) -> None:
     figs = [f for f in formats if f in FIG_FORMATS]
     if not figs:
         return
     from .export import plots
 
-    fig = fig_func(obj, title=title, style=style)
+    fig = fig_func(obj, title=title, style=style, options=options)
     try:
         for p in plots.save(fig, stem, figs):
             print(f"  wrote {p}")
@@ -294,6 +349,17 @@ def _write_step_outputs(res: Any, a: argparse.Namespace) -> None:
     if "json" in a.formats:
         pj = save_project(res, stem.with_name(stem.name + "_step.json"), DEFAULT_INSTRUMENT)
         print(f"  wrote {pj}")
+    from .export import origin as O
+
+    _origin(
+        stem.with_name(stem.name + "_step"),
+        {
+            "Profile": O.step_worksheet(res),
+            "Edges": O.step_edges_worksheet(res),
+            "Residuals": O.plane_residual_worksheet(res),
+        },
+        a.formats,
+    )
     _figures(
         plots.plot_step,
         res,
@@ -301,6 +367,7 @@ def _write_step_outputs(res: Any, a: argparse.Namespace) -> None:
         a.formats,
         a.style,
         res.source.name,
+        _fig_options(a),
     )
 
 
@@ -370,7 +437,18 @@ def cmd_roughness(a: argparse.Namespace) -> int:
             print(f"  wrote {write_xlsx(stem.with_suffix('.xlsx'), sheets)}")
         if "json" in a.formats:
             print(f"  wrote {save_project(res, stem.with_suffix('.json'))}")
-        _figures(plots.plot_roughness, res, stem, a.formats, a.style, prof.name)
+        from .export import origin as O
+
+        _origin(
+            stem,
+            {
+                "Profile": O.roughness_worksheet(res),
+                "Curves": O.roughness_curves_worksheet(res),
+                "Parameters": O.roughness_parameters_worksheet(res),
+            },
+            a.formats,
+        )
+        _figures(plots.plot_roughness, res, stem, a.formats, a.style, prof.name, _fig_options(a))
     return 0
 
 
@@ -417,7 +495,18 @@ def cmd_stress(a: argparse.Namespace) -> int:
             print(f"  wrote {write_xlsx(stem.with_suffix('.xlsx'), sheets)}")
         if "json" in a.formats:
             print(f"  wrote {save_project(res, stem.with_suffix('.json'))}")
-        _figures(plots.plot_stress, res, stem, a.formats, a.style, Path(a.post).stem)
+        from .export import origin as O
+
+        _origin(stem, {"Scans": O.stress_worksheet(res)}, a.formats)
+        _figures(
+            plots.plot_stress,
+            res,
+            stem,
+            a.formats,
+            a.style,
+            Path(a.post).stem,
+            _fig_options(a, stress=True),
+        )
     return 0
 
 
@@ -441,13 +530,17 @@ def cmd_batch(a: argparse.Namespace) -> int:
             )
         )
     else:
-        print(f"{'sample':<20} {'n':>3} {'mean (nm)':>11} {'s.d. (nm)':>10}  kinds / warnings")
+        print(
+            f"{'sample':<20} {'n':>3} {'mean (nm)':>11} {'SD (nm)':>9} {'CV (%)':>7}"
+            f" {'95% CI (nm)':>12}  kinds / warnings"
+        )
         for s in res.samples:
             extra = ",".join(s.kinds) + ("  " + ";".join(s.warnings) if s.warnings else "")
             fail = f" ({s.n_failed} failed)" if s.n_failed else ""
+            ci = f"± {_fmt(s.ci95_nm, 3)}" if s.ci95_nm is not None else "-"
             print(
-                f"{s.sample:<20} {s.n:>3} {_fmt(s.mean_nm, 6):>11} {_fmt(s.std_nm, 3):>10}"
-                f"  {extra}{fail}"
+                f"{s.sample:<20} {s.n:>3} {_fmt(s.mean_nm, 6):>11} {_fmt(s.std_nm, 3):>9}"
+                f" {_fmt(s.cv_percent, 2):>7} {ci:>12}  {extra}{fail}"
             )
         for it in res.items:
             if it.error:
@@ -483,7 +576,16 @@ def cmd_batch(a: argparse.Namespace) -> int:
             print(f"  wrote {write_xlsx(out / 'batch.xlsx', sheets)}")
         if "json" in a.formats:
             print(f"  wrote {save_project(res, out / 'batch.json', DEFAULT_INSTRUMENT)}")
-        _figures(plots.plot_batch, res, out / "batch_samples", a.formats, a.style, "")
+        from .export import origin as O
+
+        _origin(
+            out / "batch",
+            {"Samples": O.batch_worksheet(res), "Scans": O.batch_scans_worksheet(res)},
+            a.formats,
+        )
+        _figures(
+            plots.plot_batch, res, out / "batch_samples", a.formats, a.style, "", _fig_options(a)
+        )
         if a.plots:
             for it in res.items:
                 if it.result is not None:
@@ -494,6 +596,7 @@ def cmd_batch(a: argparse.Namespace) -> int:
                         [f for f in a.formats if f in FIG_FORMATS] or ["png"],
                         a.style,
                         it.path.name,
+                        _fig_options(a),
                     )
     return 0
 

@@ -192,7 +192,7 @@ QGroupBox::title {{
     left: 8px;
     padding: 0 4px;
 }}
-QTreeWidget, QTableWidget, QPlainTextEdit, QListWidget {{
+QTreeWidget, QTableWidget, QTableView, QPlainTextEdit, QListWidget {{
     background: {t.plot_bg};
     border: 1px solid {t.border};
     gridline-color: {t.grid};

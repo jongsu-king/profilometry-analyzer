@@ -56,6 +56,8 @@ class PlaneFit:
     n_excluded: int
     burrs: list[dict[str, Any]] = field(default_factory=list)
     used: np.ndarray | None = None
+    mask: np.ndarray | None = None
+    """Points offered to the fit (``used`` is the subset that stayed in it)."""
 
     @property
     def slope(self) -> float:
@@ -140,6 +142,7 @@ def fit_plane(
         n_excluded=int(mask.sum() - inl.sum()),
         burrs=burrs,
         used=inl,
+        mask=mask,
     )
 
 

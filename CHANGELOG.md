@@ -23,5 +23,20 @@ First version.
 - Desktop application (PySide6 + PyQtGraph) with draggable cursors and edge lines.
 - Command-line output keeps working on narrow code pages: a piped or redirected stream on
   Windows (cp1252) is switched to UTF-8, so reports with λ no longer fail.
-- Synthetic test data generator with stylus tracing; 94 tests.
+- Origin-style research outputs: figures as multi-layer graphs with panel letters,
+  dimension lines (h, d, W) and a residual layer of the plane fits; roughness figure with
+  parameter table, amplitude distribution and material ratio (Abbott-Firestone) curve;
+  stress figure with fit residuals; batch column chart with SD / SE / 95 % CI error bars;
+  journal size presets (single, 1.5, double column, slide), dpi, font size, display units,
+  TIFF output and editable text in SVG / PDF (`--figure-size`, `--dpi`, `--font-size`,
+  `--x-display`, `--z-display`, `--no-annotate`, `--no-residuals`, `--error-bar`).
+- Origin-ready worksheets (`--formats origin`): CSV and xlsx with Long Name, Units and
+  Comments rows.
+- Batch statistics: standard error, coefficient of variation, median and the 95 %
+  confidence interval of the mean (Student t) per sample.
+- Desktop: Plot Details dialog (units, axis limits, fonts, line width, layers), residual
+  layer and dimension lines on the live graph, data reader snapping to data points,
+  Shift-click two-point Δx/Δz, overlay of scans with optional offset, worksheet tab with
+  copy as tab-separated text, batch column chart, Export Figure dialog, copy graph.
+- Synthetic test data generator with stylus tracing; 115 tests.
 - Not validated against real instrument scans yet.

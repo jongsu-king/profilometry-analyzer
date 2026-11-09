@@ -186,3 +186,34 @@ Checks: `STONEY_THICK_FILM` (h_f/h_s > 1 %, error above 5 %), `STONEY_LARGE_DEFL
 `CURVATURE_CHANGE_NOT_SIGNIFICANT` (|Δκ| < 2 u), `SCAN_MISMATCH` (length or spacing
 differ), `STRESS_NO_REFERENCE` (no scan before deposition: flat assumed),
 `SUBSTRATE_THICKNESS_TYPICAL`, `SUBSTRATE_VALUE_UNVERIFIED`.
+
+## 8. Figures, statistics and worksheets
+
+**Dimension lines.** For a film edge the height line is drawn beside the edge, between
+the two plane fits evaluated at the half-height position (with extension lines), and
+labelled `h = value ± u`. For an ISO 5436-1 A1 groove or ridge the depth line runs at
+the groove centre from the upper line to the bottom line (`d`, or `h` for a ridge), and
+the width line spans W between the half-height crossings, drawn inside the feature. The
+numbers are the reported results; drawing changes nothing.
+
+**Residual layer.** For every plane fit, levelled height minus the fitted line, for the
+points that stayed in the fit; points offered to the fit but rejected (burr flanks,
+outliers) are shown separately. The dashed lines are ±2σ of the plane residuals
+(median over the planes). Correlated residuals - waviness, roughness - are visible here
+before they appear as `CORRELATED_RESIDUALS`.
+
+**Roughness curves.** Material ratio (Abbott-Firestone) curve: at each height c, the
+fraction of evaluated points at or above c (uniform sampling, so equal to the fraction
+of the evaluation length). Amplitude distribution: histogram density of the evaluated
+roughness profile, bin width by the Freedman-Diaconis rule (10-200 bins). No
+material-ratio parameter (Rmr, Rdc, Rk family) is derived from them in this version.
+
+**Batch statistics.** Per sample: n, mean, sample standard deviation (n − 1), standard
+error SD/√n, coefficient of variation SD/|mean| in %, median, minimum, maximum and the
+half-width of the 95 % confidence interval of the mean, t(0.975, n − 1)·SE. With one scan
+the spread entries are empty. These describe scan-to-scan scatter; the single-scan
+uncertainty `u` (section 5) is reported separately.
+
+**Worksheets.** Three header rows - Long Name, Units, Comments - then the data; empty
+cells for missing values; xlsx with the header rows shaded and frozen. Column roles
+(X, Y, yEr, L) are shown in the desktop worksheet as `A(X)`, `B(Y)`…
