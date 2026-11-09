@@ -145,7 +145,7 @@ from the Incheon National University core facility (Bruker DEKTAK XT-E, CSV and 
 possible OPDx) and the step and roughness values Vision64 reported for the same scans
 has not been done. Until it is, do not treat the results as validated for real data.
 
-**Quality.** `pytest` (93 tests), `ruff` and `mypy` pass; CI runs on Windows, macOS and
+**Quality.** `pytest` (94 tests), `ruff` and `mypy` pass; CI runs on Windows, macOS and
 Linux with Python 3.11, 3.12 and 3.13.
 
 ## Reproducibility

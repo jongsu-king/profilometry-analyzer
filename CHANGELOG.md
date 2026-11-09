@@ -21,5 +21,7 @@ First version.
 - Stoney film stress with a substrate table and assumption checks.
 - Batch per sample, CSV / xlsx / PNG / SVG / PDF / JSON output, `verify`.
 - Desktop application (PySide6 + PyQtGraph) with draggable cursors and edge lines.
-- Synthetic test data generator with stylus tracing; 93 tests.
+- Command-line output keeps working on narrow code pages: a piped or redirected stream on
+  Windows (cp1252) is switched to UTF-8, so reports with λ no longer fail.
+- Synthetic test data generator with stylus tracing; 94 tests.
 - Not validated against real instrument scans yet.

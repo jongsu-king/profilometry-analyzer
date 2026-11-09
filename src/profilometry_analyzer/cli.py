@@ -648,7 +648,38 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+_PROBE_TEXT = "λc λs µm ± σ Å"
+
+
+def _make_streams_encodable() -> None:
+    """Keep printing when stdout or stderr uses a narrow code page.
+
+    A piped or redirected stream on Windows uses the locale code page (for example
+    cp1252), which cannot encode the λ of the roughness report; ``print`` then raises
+    ``UnicodeEncodeError``, a ``ValueError``, and the command failed.  Such a stream is
+    switched to UTF-8; a console keeps its encoding and replaces what it cannot show.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if stream is None or reconfigure is None:
+            continue
+        try:
+            _PROBE_TEXT.encode(stream.encoding or "ascii")
+            continue
+        except (LookupError, UnicodeEncodeError):
+            pass
+        try:
+            if stream.isatty():
+                reconfigure(errors="replace")
+            else:
+                reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):  # pragma: no cover - stream already in use
+            pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _make_streams_encodable()
     ap = build_parser()
     a = ap.parse_args(list(argv) if argv is not None else None)
     try:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -115,6 +117,29 @@ def test_cli_commands(demo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[
     assert "OK" in capsys.readouterr().out
     assert main(["step", f, "--regions", "100:400,600:900", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["measurement"]["method"] == "regions"
+
+
+class _ConsoleBytes(io.BytesIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_cli_prints_on_narrow_code_page(
+    demo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cp1252 pipe (Windows default) cannot encode λ; the command must still succeed."""
+    raw = io.BytesIO()
+    pipe = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", pipe)
+    r = str(demo / "roughness" / "sine_A12nm_40um.csv")
+    assert main(["roughness", r, "--lc", "800", "--ls", "0"]) == 0
+    sys.stdout.flush()
+    assert "λc = 800 µm" in raw.getvalue().decode("utf-8")
+
+    console = io.TextIOWrapper(_ConsoleBytes(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", console)
+    assert main(["roughness", r, "--lc", "800", "--ls", "0"]) == 0
+    assert sys.stdout.encoding == "cp1252" and sys.stdout.errors == "replace"
 
 
 def test_cli_roughness_stress_batch(
