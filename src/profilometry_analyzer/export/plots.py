@@ -766,7 +766,7 @@ def plot_batch(
             idx,
             heights,
             width=0.6,
-            color=[to_rgba(SERIES[i % len(SERIES)], 0.35) for i in idx],
+            color=[to_rgba(SERIES[i % len(SERIES)], 0.35) for i in range(len(samples))],
             edgecolor="black",
             linewidth=0.8,
             label=f"mean ± {err_name}",
