@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/jongsu-king/profilometry-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/jongsu-king/profilometry-analyzer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24097834.svg)](https://doi.org/10.5281/zenodo.24097834)
 
 Reproducible **step height / film thickness**, **roughness** and **film stress** from
 stylus profilometer line scans. A desktop application and a command-line tool share one
@@ -271,8 +272,16 @@ Working like a graphing program:
 
 ## Citation
 
-See [`CITATION.cff`](CITATION.cff). A DOI will be added once the first release is
-archived on Zenodo.
+If you use Profilometry Analyzer, please cite it. Releases are archived on Zenodo: the
+concept DOI [10.5281/zenodo.24097834](https://doi.org/10.5281/zenodo.24097834) always
+resolves to the latest version, and version 0.1.0 is
+[10.5281/zenodo.24097835](https://doi.org/10.5281/zenodo.24097835).
+
+> Lim, J. (2026). *Profilometry Analyzer* (Version 0.1.0) [Computer software]. Zenodo.
+> https://doi.org/10.5281/zenodo.24097835
+
+[`CITATION.cff`](CITATION.cff) holds the same information (GitHub shows it as "Cite this
+repository").
 
 ## License and trademarks
 
