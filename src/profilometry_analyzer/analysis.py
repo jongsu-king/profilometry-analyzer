@@ -21,6 +21,7 @@ from .core.steps import (
     measure_regions,
     range_notices,
     refine_edges,
+    widen_transitions,
 )
 from .core.stress import StressResult, StressSettings, stress
 from .instrument import DEFAULT_INSTRUMENT, InstrumentSpec
@@ -61,6 +62,10 @@ class StepSettings:
     margin_um: float | None = None
     min_plane_um: float | None = None
     burr_k: float = 4.0
+    multiscale: bool = True
+    """Look for wide, gentle edges with wider derivative smoothings as well."""
+    widen: bool = True
+    """Widen a transition while the plateau next to it still runs towards the other level."""
     tip_radius_um: float | None = None
     stylus_force_mg: float | None = None
     soft_film: bool = False
@@ -178,6 +183,7 @@ class StepResult:
             "u_nm": m.u_nm,
             "u_fit_nm": m.u_fit_nm,
             "u_slope_nm": m.u_slope_nm,
+            "u_tail_nm": m.u_tail_nm,
             "position_um": m.position_um,
             "width_um": m.width_um,
             "n_edges": len(self.edges.edges),
@@ -222,6 +228,7 @@ def _edge_options(st: StepSettings, tip: float) -> dict[str, Any]:
         "min_step_nm": st.min_step_nm,
         "margin_um": st.margin_um,
         "min_plane_um": st.min_plane_um,
+        "multiscale": st.multiscale,
     }
 
 
@@ -286,6 +293,14 @@ def analyze_step(
         )
     else:
         eset = detect_edges(x, lp.z_nm, lp.valid, **opts)
+    widen_notes: list[Notice] = []
+    if st.widen and not st.regions_um and eset.edges:
+        widen_notes = widen_transitions(x, lp.z_nm, eset, k=st.burr_k)
+        if widen_notes and st.level == "auto":
+            # level again with the wider transitions kept out of the trend fit
+            lp, lev, _ = level_auto(
+                p, method=st.level_method, order=st.bow_order, edges=eset, seed=st.seed
+            )
     if not st.edges_um:
         refine_edges(x, lp.z_nm, eset, k=st.burr_k)
     detected = classify(eset.edges)
@@ -300,7 +315,7 @@ def analyze_step(
         meas = measure(x, lp.z_nm, eset, kind, k=st.burr_k, tip_radius_um=tip)
     noise = float(eset.threshold.get("height_noise_nm", 0.0))
     meas.notices += range_notices(meas, noise, instrument)
-    notes = list(lp.notices) + list(eset.notices) + list(meas.notices)
+    notes = list(lp.notices) + list(eset.notices) + widen_notes + list(meas.notices)
     notes += soft_film_notices(lp, instrument)
     if tip_src == "instrument default":
         notes.append(

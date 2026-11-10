@@ -283,6 +283,16 @@ class MainWindow(QMainWindow):
         self.sp_edge_k = _spin(2, 50, 6, 0.5, 1)
         self.sp_burr_k = _spin(2, 20, 4, 0.5, 1)
         self.sp_margin = _spin(0, 1000, 0, 0.5, 2, "auto")
+        self.chk_multiscale = QCheckBox("find wide, gentle edges")
+        self.chk_multiscale.setChecked(True)
+        self.chk_multiscale.setToolTip(
+            "also search with 3, 9, 27 ... times wider derivative smoothing"
+        )
+        self.chk_widen = QCheckBox("widen transitions until the plateaus are flat")
+        self.chk_widen.setChecked(True)
+        self.chk_widen.setToolTip(
+            "grow a transition while the plateau next to it still runs towards the other level"
+        )
         self.btn_reset_edges = QPushButton("Reset edited edges")
         self.btn_reset_edges.clicked.connect(self._reset_edges)
         f.addRow("profile kind", self.cb_mode)
@@ -291,6 +301,8 @@ class MainWindow(QMainWindow):
         f.addRow("edge threshold (σ)", self.sp_edge_k)
         f.addRow("burr exclusion (σ)", self.sp_burr_k)
         f.addRow("edge margin (µm)", self.sp_margin)
+        f.addRow("", self.chk_multiscale)
+        f.addRow("", self.chk_widen)
         f.addRow("", self.btn_reset_edges)
         lay.addWidget(g)
         g = QGroupBox("STYLUS AND FILM")
@@ -579,6 +591,8 @@ class MainWindow(QMainWindow):
             edge_k=self.sp_edge_k.value(),
             burr_k=self.sp_burr_k.value(),
             margin_um=self.sp_margin.value() or None,
+            multiscale=self.chk_multiscale.isChecked(),
+            widen=self.chk_widen.isChecked(),
             tip_radius_um=self.sp_tip.value() or None,
             stylus_force_mg=self.sp_force.value() or None,
             soft_film=self.chk_soft.isChecked(),
@@ -769,7 +783,7 @@ class MainWindow(QMainWindow):
                     (
                         "u (k=1)",
                         f"{m.u_nm:.3g} nm (fit {m.u_fit_nm or 0:.2g},"
-                        f" slope {m.u_slope_nm or 0:.2g})",
+                        f" slope {m.u_slope_nm or 0:.2g}, tail {m.u_tail_nm or 0:.2g})",
                     )
                 )
         if m.position_um is not None:
@@ -829,6 +843,7 @@ class MainWindow(QMainWindow):
                 "u_nm",
                 "u_fit_nm",
                 "u_slope_nm",
+                "u_tail_nm",
                 "width_um",
             ],
         )

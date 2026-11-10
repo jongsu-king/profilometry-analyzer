@@ -30,7 +30,9 @@ class SynthSpec:
     width_um: float = 200.0
     """Groove or ridge width (between half-height points)."""
     wall_um: float = 2.0
-    """Width of a wall (10-90 % rise of a smooth step)."""
+    """Width of a wall: 10-90 % rise of a logistic step, or the full length of a ramp."""
+    wall_shape: str = "logistic"
+    """``logistic`` (smooth, exponential tails) or ``ramp`` (straight slope, sharp corners)."""
     period_um: float = 100.0
     n_steps: int = 2
     tilt_nm_per_um: float = 0.0
@@ -61,10 +63,15 @@ class Synthetic:
     truth: dict[str, Any] = field(default_factory=dict)
 
 
-def _smooth_step(x: np.ndarray, x0: float, wall: float) -> np.ndarray:
-    """0 -> 1 step at ``x0`` whose 10-90 % rise is ``wall``."""
+def _smooth_step(x: np.ndarray, x0: float, wall: float, shape: str = "logistic") -> np.ndarray:
+    """0 -> 1 step at ``x0``: a logistic whose 10-90 % rise is ``wall``, or a straight
+    ramp ``wall`` long."""
     if wall <= 0:
         return (x >= x0).astype(float)
+    if shape == "ramp":
+        return np.asarray(np.clip((x - x0) / wall + 0.5, 0.0, 1.0))
+    if shape != "logistic":
+        raise ValueError("wall_shape must be logistic or ramp")
     s = wall / 4.394  # 10-90 % of a logistic is 4.394 scale units
     return 0.5 * (1.0 + np.tanh((x - x0) / (2.0 * s)))
 
@@ -96,14 +103,16 @@ def surface(spec: SynthSpec) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     truth: dict[str, Any] = {"kind": spec.kind}
     z = np.zeros_like(x)
     if spec.kind == "edge":
-        z = h * _smooth_step(x, c, spec.wall_um)
+        z = h * _smooth_step(x, c, spec.wall_um, spec.wall_shape)
         truth.update(value_nm=h, thickness_nm=abs(h), position_um=c)
         if spec.burr_nm:
             hi_side = c + spec.wall_um if h > 0 else c - spec.wall_um
             z += spec.burr_nm * np.exp(-0.5 * ((x - hi_side) / (spec.burr_width_um / 4)) ** 2)
     elif spec.kind in ("groove", "ridge"):
         a, b = c - spec.width_um / 2, c + spec.width_um / 2
-        box = _smooth_step(x, a, spec.wall_um) - _smooth_step(x, b, spec.wall_um)
+        box = _smooth_step(x, a, spec.wall_um, spec.wall_shape) - _smooth_step(
+            x, b, spec.wall_um, spec.wall_shape
+        )
         sign = -1.0 if spec.kind == "groove" else 1.0
         z = h + sign * h * box if spec.kind == "groove" else h * box
         truth.update(value_nm=abs(h), thickness_nm=abs(h), position_um=c, width_um=spec.width_um)
@@ -120,13 +129,16 @@ def surface(spec: SynthSpec) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
             s1 = s0 + spec.period_um / 2
             if s1 + spec.period_um / 4 > spec.length_um:
                 break
-            z += h * (_smooth_step(x, s0, spec.wall_um) - _smooth_step(x, s1, spec.wall_um))
+            z += h * (
+                _smooth_step(x, s0, spec.wall_um, spec.wall_shape)
+                - _smooth_step(x, s1, spec.wall_um, spec.wall_shape)
+            )
             n += 2
         truth.update(value_nm=abs(h), thickness_nm=abs(h), period_um=spec.period_um, n_edges=n)
     elif spec.kind == "staircase":
         pos = np.linspace(0, spec.length_um, spec.n_steps + 2)[1:-1]
         for p in pos:
-            z += h * _smooth_step(x, p, spec.wall_um)
+            z += h * _smooth_step(x, p, spec.wall_um, spec.wall_shape)
         truth.update(step_nm=h, n_edges=spec.n_steps, positions_um=pos.tolist())
     elif spec.kind == "sine":
         A, lam = spec.sine_amplitude_nm, spec.sine_wavelength_um

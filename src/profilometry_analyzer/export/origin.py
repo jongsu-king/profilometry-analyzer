@@ -165,6 +165,7 @@ def step_edges_worksheet(res: StepResult) -> list[Column]:
         Column("u(height)", "nm", "k = 1", col("u_nm"), "yEr"),
         Column("u fit", "nm", "regression part", col("u_fit_nm")),
         Column("u slope", "nm", "plane slope difference part", col("u_slope_nm")),
+        Column("u tail", "nm", "unresolved tail of a widened transition", col("u_tail_nm")),
         Column("Transition width", "µm", "", col("width_um")),
     ]
 

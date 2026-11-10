@@ -3,7 +3,8 @@ shared slope and per-segment offsets, uniform resampling."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -79,6 +80,97 @@ def n_effective(r: np.ndarray) -> float:
     return float(max(2.0, n / integrated_time(np.asarray(r, dtype=float))))
 
 
+def pooled_autocorrelation(pieces: Sequence[np.ndarray], max_lag: int) -> np.ndarray:
+    """Autocorrelation (lags ``0..max_lag``) of several residual sequences of one process.
+
+    The lagged products of every piece are summed and divided by the number of pairs, so
+    a long plane weighs more than a short one and no pair spans two pieces.  The pieces
+    are residuals of fits and are not centred again.
+    """
+    num = np.zeros(max_lag + 1)
+    cnt = np.zeros(max_lag + 1)
+    for piece in pieces:
+        r = np.asarray(piece, dtype=float)
+        n = r.size
+        if n < 2:
+            continue
+        m = 1 << (2 * n - 1).bit_length()
+        f = np.fft.rfft(r, m)
+        ac = np.fft.irfft(f * np.conjugate(f), m)[:n]
+        lags = min(max_lag + 1, n)
+        num[:lags] += ac[:lags]
+        cnt[:lags] += np.arange(n, n - lags, -1)
+    g = num / np.maximum(cnt, 1.0)
+    return np.asarray(g / g[0]) if g[0] > 0 else np.zeros(max_lag + 1)
+
+
+def correlation_time(
+    pieces: Sequence[np.ndarray], *, n_params: int, max_iter: int = 50
+) -> dict[str, float]:
+    """Integrated autocorrelation time of fit residuals, corrected for the fitted lines.
+
+    Residuals of a line fitted over a plane only a few correlation lengths long have an
+    autocorrelation that falls too fast: removing ``P`` parameters from ``n`` points
+    lowers every sample autocorrelation by about ``f = P tau / n``.  Summing the sample
+    autocorrelation (:func:`integrated_time`) therefore underestimates ``tau`` - by a
+    factor of three for roughness correlated over a twentieth of the plane in the
+    synthetic tests.
+
+    Here the sample autocorrelation pooled over all pieces is corrected,
+    ``rho = rho_hat (1 - f) + f``, and described by a correlated fraction ``w = rho(1)``
+    and the lag ``l`` where it has fallen to ``w / e``; for an exponential correlation
+    ``tau = 1 + w (2 l - 1)`` (a Gaussian correlation gives 13 % less, so the estimate
+    leans to the safe side).  ``f`` depends on ``tau``, so the two are iterated; ``f`` is
+    capped at 0.5, beyond which the planes are too short to say more.  The larger of this
+    and the windowed sum of the pooled autocorrelation is returned.
+    """
+    arrs = [np.asarray(p, dtype=float) for p in pieces if np.asarray(p).size >= 4]
+    n_tot = int(sum(a.size for a in arrs))
+    out = {"tau": 1.0, "tau_sum": 1.0, "correlated_fraction": 0.0, "e_folding_points": 0.0}
+    if not arrs or n_tot < 8:
+        return out
+    max_lag = max(min(a.size for a in arrs) // 2, 2)
+    rho_hat = pooled_autocorrelation(arrs, max_lag)
+    tau_sum = 1.0
+    for m in range(1, max_lag):
+        tau_sum += 2.0 * rho_hat[m]
+        if m >= 5.0 * tau_sum:
+            break
+    tau_sum = float(max(tau_sum, 1.0))
+    f_max = 0.5
+    tau = tau_sum
+    w = 0.0
+    le = 0.0
+    for _ in range(max_iter):
+        f = min(n_params * tau / n_tot, f_max)
+        rho = rho_hat * (1.0 - f) + f
+        w = float(min(max(rho[1], 0.0), 1.0))
+        if w < 0.05:
+            break
+        target = w / np.e
+        below = np.flatnonzero(rho[1:] < target)
+        if below.size:
+            k = int(below[0]) + 1
+            r0, r1 = float(rho[k - 1]), float(rho[k])
+            le = (k - 1) + ((r0 - target) / (r0 - r1) if r0 != r1 else 0.5)
+        else:
+            le = float(max_lag)
+        new = 1.0 + w * (2.0 * le - 1.0)
+        new = min(new, f_max * n_tot / max(n_params, 1))
+        if abs(new - tau) <= 1e-4 * tau:
+            tau = new
+            break
+        tau = new
+    out.update(
+        tau=float(max(tau, tau_sum, 1.0)),
+        tau_sum=tau_sum,
+        correlated_fraction=w,
+        e_folding_points=float(le),
+        points=float(n_tot),
+    )
+    return out
+
+
 @dataclass
 class LineFit:
     slope: float
@@ -99,6 +191,17 @@ class LineFit:
     def var_at(self, x: float) -> float:
         v = np.array([x - self.x0, 1.0])
         return float(v @ self.cov @ v)
+
+    @property
+    def tau(self) -> float:
+        """Autocorrelation time (points) behind the covariance inflation."""
+        return float(max(self.n / max(self.n_eff, 1e-300), 1.0))
+
+    def with_tau(self, tau: float) -> LineFit:
+        """The same line with its covariance inflated for an autocorrelation time ``tau``."""
+        n_eff = float(max(2.0, self.n / max(float(tau), 1.0)))
+        new = max(self.n / n_eff, 1.0)
+        return replace(self, cov=self.cov * (new / self.tau), n_eff=n_eff)
 
     def to_dict(self) -> dict[str, Any]:
         return {

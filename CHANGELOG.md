@@ -38,5 +38,22 @@ First version.
   layer and dimension lines on the live graph, data reader snapping to data points,
   Shift-click two-point Δx/Δz, overlay of scans with optional offset, worksheet tab with
   copy as tab-separated text, batch column chart, Export Figure dialog, copy graph.
-- Synthetic test data generator with stylus tracing; 115 tests.
+- Wide, gently running-out edges: the derivative is also searched with 3, 9, 27 ... times
+  wider smoothings (`WIDE_EDGE`), and each transition is widened while the plateau next
+  to it still runs towards the other level (`TRANSITION_WIDENED`; `TRANSITION_TAIL` when
+  a quarter of a plateau or more was needed). A 200 µm wide edge in a 2 mm scan read
+  2 nm low with fixed margins and now 0.11 nm low on average (at most 0.30 nm); a 600 µm
+  ramp that was not found is measured. `--single-scale` and `--no-widen` (and two GUI
+  check boxes) restore the first behaviour.
+- Uncertainty: the autocorrelation time of the plane residuals is pooled over the planes
+  and corrected for the fitted lines, so roughness correlated over a few percent of a
+  plane no longer makes u too small (90 % instead of 80 % within 2u at 5 µm; standardised
+  error SD 0.94 instead of 1.8 at 20 µm). New component `u_tail` next to widened
+  transitions, in the tables, the GUI and the Origin edge worksheet.
+- A single noise point beyond four sigmas with two mildly raised neighbours is no longer
+  reported as a burr (it is still excluded).
+- Faster plane fits (vectorised burr search); the coarse derivatives work on block means,
+  so the wide-edge search adds about 0.3 s to a 120 000-point scan.
+- Synthetic profiles: `wall_shape` `logistic` or `ramp`.
+- Synthetic test data generator with stylus tracing; 131 tests.
 - Not validated against real instrument scans yet.

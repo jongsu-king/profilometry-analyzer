@@ -37,6 +37,38 @@ closer than two smoothing widths are merged; runs of opposite sign are never mer
 run is an edge when the smoothed height changes across it by more than five times the
 height noise (and `--min-step`).
 
+**Wide edges.** A film edge that runs out over tens to hundreds of micrometres (a
+tapered, shadow-masked or wiped edge) does not stand out in a derivative smoothed over
+one stylus radius. The derivative is therefore computed again with smoothings 3, 9,
+27 … times wider, as long as σ ≤ 1/40 of the scan (on block means of about σ/4, so that
+long scans stay fast). At these scales a tilt or a parabolic bow of the whole scan gives
+a large, smoothly varying derivative, so a robust straight line through the derivative
+(points beyond 2.5 robust sigmas left out, iterated) is subtracted first, and runs
+within three smoothing widths of the scan ends are ignored. Runs that do not overlap an
+edge already found are grown at 2 σ_d like the others, shortened by one smoothing width
+on each side (the broadening by the smoothing itself) and kept when they pass the
+height threshold; they are reported as `WIDE_EDGE` (info). `--single-scale` (GUI: *find
+wide, gentle edges*) turns the search off. On flat profiles with a 40 nm bow, with
+roughness correlated over 20 µm and on 120 000-point scans the search added no edge in
+the tests.
+
+**Widening the transitions.** A fixed margin does not remove the tail of a gently
+running-out edge; the tail pulls the two plane fits towards each other. For each side of
+each edge, the block of the plateau next to the edge (0.02, 0.05 and 0.1 of the plateau
+length, at least ten points; the shortest block that shows the tail is used) is compared
+with the line through the rest of the plateau. When the block mean lies more than three
+standard errors towards the other level, the block is added to the transition and the
+test is repeated, up to half the plateau. The standard error allows for the residual
+correlation, estimated from the half of every plateau farthest from its edges (in the
+residuals of the whole plateau a tail looks like long-range correlation and would hide
+itself by inflating the standard error). Points more than k sigmas *away* from the other
+level - burrs, particles on the high side - stay out of the block mean. The widening is
+reported (`TRANSITION_WIDENED`, info) and shown in the transition regions; a side that
+still bends at the limit, or that needed a quarter of its plateau or more, gives
+`TRANSITION_TAIL` (warning): the rest of the plateau is then probably still inside the
+tail. With automatic levelling the profile is levelled again with the wider transitions.
+`--no-widen` (GUI: *widen transitions until the plateaus are flat*) turns this off.
+
 Plateaus lie between edges, shortened by a margin of two stylus radii next to each edge.
 A plateau shorter than `max(3 r, 10 dx)` is dissolved: its two edges become one
 transition, or, if the net height change is below the threshold (a burr top, dust, a
@@ -74,8 +106,9 @@ history, so a height computed on a bow-corrected profile is always labelled.
 
 Each plane is a least-squares line through the usable points. Points beyond `k` robust
 sigmas (k = 4) are excluded iteratively; raised runs are grown until the residual falls
-below one sigma so a whole burr is excluded, and runs of at least three points are
-reported as burrs (`BURR_EXCLUDED`). Raised rims inside the excluded zones next to an edge
+below one sigma so a whole burr is excluded, and runs with at least three points above
+two sigmas are reported as burrs (`BURR_EXCLUDED`; one noise point beyond four sigmas is
+excluded but not reported). Raised rims inside the excluded zones next to an edge
 or a groove (A1 `W/3` zones) are also reported.
 
 ### Film edge, staircase, periodic
@@ -111,15 +144,33 @@ are traced worse than this estimate.
 
 * `u_fit = √(var_left(x_e) + var_right(x_e))` from the line covariances. Each covariance
   is the ordinary one multiplied by `n / n_eff`, where `n_eff = n / τ` and `τ` is the
-  integrated autocorrelation time of the residuals (Sokal's window, c = 5).
+  autocorrelation time of the residuals (below).
 * `u_slope = |m_right − m_left| · gap / 2`: how much the height changes across the
   excluded gap between the two fitted regions when the planes are not parallel.
-* `u = √(u_fit² + u_slope²)`.
+* `u_tail`: only next to a widened transition - the mean offset towards the other level
+  that the block next to the edge (a tenth of the plane) still shows, summed over both
+  sides: the part of the tail that the widening test could not resolve.
+* `u = √(u_fit² + u_slope² + u_tail²)`.
+
+**Autocorrelation time.** Removing the P parameters of the fitted lines from n points
+lowers every sample autocorrelation by about `f = P τ / n`. When a plane is only a few
+correlation lengths long this is large, and summing the sample autocorrelation (Sokal's
+window, c = 5, as in the first version) underestimates τ - by a factor of three for
+roughness correlated over 20 µm on 450 µm planes. The residuals of all planes of the
+measurement are therefore pooled (no pair spans two planes or a gap), corrected with
+`ρ = ρ̂ (1 − f) + f`, and described by the correlated fraction `w = ρ(1)` and the lag `l`
+at which ρ has fallen to `w/e`; for an exponential correlation `τ = 1 + w (2 l − 1)` (a
+Gaussian correlation has 13 % less, so the estimate leans to the safe side). `f` depends
+on τ, so the two are iterated; `f` is capped at 0.5. The larger of this and the windowed
+sum is used, and a plane keeps its own estimate when that is larger.
 
 Instrument calibration and the scatter between positions on the sample are not in `u`;
 the batch table gives the mean, standard deviation and n per sample. On synthetic data u
-is well calibrated for white noise and too small by a factor of about 1.2–2.3 for
-roughness correlated over a few percent of the plane length (`CORRELATED_RESIDUALS`).
+is well calibrated for white noise; with roughness correlated over 5 and 20 µm 90 % of
+the errors fall within 2u (95 % expected). Planes with fewer than 30 independent points
+carry `CORRELATED_RESIDUALS`: there the uncertainty rests on the assumed shape of the
+correlation. For gently running-out edges `u_tail` keeps 93–97 % of the errors within
+2u up to 200 µm wide walls in a 2 mm scan; wider edges carry `TRANSITION_TAIL`.
 
 ### Range checks
 

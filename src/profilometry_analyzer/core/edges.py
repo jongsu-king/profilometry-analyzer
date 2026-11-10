@@ -12,6 +12,14 @@ corners drawn by the stylus never enter a plane fit.  A segment that is too shor
 fit after the margins (a burr on the rim of a scratch, a dust particle, a narrow line)
 is dissolved: its two edges become one transition, or - when the net height change is
 below the threshold - a narrow feature that is excluded from every fit and reported.
+
+Wide, gentle edges (a spin-coated or shadow-masked film edge running out over tens to
+hundreds of micrometres) do not stand out in a derivative smoothed over one stylus
+radius.  With ``multiscale`` (the default) the derivative is computed again with
+smoothings ``3, 9, 27 ...`` times wider, up to a fortieth of the scan, and edges found
+only there are added.  At these scales a tilt or a parabolic bow of the whole scan
+would look like a large derivative, so a robust straight line through the derivative
+is removed first, and runs near the scan ends are ignored.
 """
 
 from __future__ import annotations
@@ -45,6 +53,11 @@ class Edge:
     manual: bool = False
     x_centroid_um: float | None = None
     """Derivative centroid, kept when the centre is refined to the half-height point."""
+    smooth_um: float | None = None
+    """Derivative smoothing at which the edge was found (``None``: the base smoothing)."""
+    widened_um: tuple[float, float] = (0.0, 0.0)
+    """How far the transition was widened on the left and right side because the plateau
+    next to it was not yet flat (:func:`~profilometry_analyzer.core.steps.widen_transitions`)."""
 
     @property
     def width_um(self) -> float:
@@ -64,6 +77,8 @@ class Edge:
             "height_nm": self.height_nm,
             "manual": self.manual,
             "x_centroid_um": self.x_centroid_um,
+            "smooth_um": self.smooth_um,
+            "widened_um": list(self.widened_um),
         }
 
 
@@ -167,6 +182,96 @@ def smoothed_derivative(
     return zs, np.gradient(zs, x)
 
 
+def _robust_poly(x: np.ndarray, y: np.ndarray, valid: np.ndarray, order: int = 1) -> np.ndarray:
+    """Polynomial through ``y`` with points beyond 2.5 robust sigmas left out."""
+    use = valid & np.isfinite(y)
+    if use.sum() <= order + 1:
+        return np.zeros_like(y)
+    c = float(np.mean(x))
+    h = float(max(np.ptp(x) / 2.0, 1e-12))
+    t = (x - c) / h
+    coef = np.polyfit(t[use], y[use], order)
+    for _ in range(20):
+        r = y - np.polyval(coef, t)
+        s = mad_sigma(r[use])
+        if not s > 0:
+            break
+        new = valid & np.isfinite(y) & (np.abs(r) <= 2.5 * s)
+        if new.sum() <= order + 1 or np.array_equal(new, use):
+            break
+        use = new
+        coef = np.polyfit(t[use], y[use], order)
+    return np.asarray(np.polyval(coef, t))
+
+
+def _signed_runs(dd: np.ndarray, thresh: float) -> list[tuple[int, int, int]]:
+    out = [(a, b, 1) for a, b in runs(dd > thresh)]
+    out += [(a, b, -1) for a, b in runs(dd < -thresh)]
+    return sorted(out)
+
+
+def _coarse_derivative(x: np.ndarray, zf: np.ndarray, s: float) -> np.ndarray:
+    """``dz/dx`` smoothed with a Gaussian of sigma ``s``, computed on block means of
+    about ``s / 4`` (the block averaging is negligible next to the Gaussian) and
+    interpolated back - a long kernel on every point would be slow for 100k-point scans."""
+    dx = float(np.median(np.diff(x)))
+    q = max(int(s / (4.0 * dx)), 1)
+    if q == 1:
+        return np.gradient(gaussian_filter1d(zf, max(s / dx, 1.0), mode="nearest"), x)
+    m = (x.size // q) * q
+    xb = x[:m].reshape(-1, q).mean(axis=1)
+    zb = zf[:m].reshape(-1, q).mean(axis=1)
+    if m < x.size:
+        xb = np.append(xb, x[m:].mean())
+        zb = np.append(zb, zf[m:].mean())
+    db = np.gradient(gaussian_filter1d(zb, max(s / (q * dx), 1.0), mode="nearest"), xb)
+    return np.asarray(np.interp(x, xb, db))
+
+
+def _coarse_runs(
+    x: np.ndarray,
+    zf: np.ndarray,
+    valid: np.ndarray,
+    smooth: float,
+    k: float,
+    k_extend: float,
+    taken: np.ndarray,
+    *,
+    factor: float = 3.0,
+) -> list[tuple[int, int, float, np.ndarray]]:
+    """Edges that only a wider smoothing reveals: ``(start, stop, smooth_um, dd)``."""
+    n = x.size
+    dx = float(np.median(np.diff(x)))
+    length = float(x[-1] - x[0])
+    taken = taken.copy()
+    found: list[tuple[int, int, float, np.ndarray]] = []
+    s = smooth * factor
+    while s <= length / 40.0:
+        d = _coarse_derivative(x, zf, s)
+        dd = d - _robust_poly(x, d, valid, order=1)
+        sd = mad_sigma(dd[valid])
+        s_pts = int(np.ceil(s / dx))
+        if sd > 0:
+            ext = np.abs(dd) > k_extend * sd
+            guard = 3 * s_pts
+            for a, b, sign in _signed_runs(dd, k * sd):
+                if a <= guard or b >= n - guard or taken[a:b].any():
+                    continue
+                while a > 0 and ext[a - 1] and np.sign(dd[a - 1]) == sign and not taken[a - 1]:
+                    a -= 1
+                while b < n and ext[b] and np.sign(dd[b]) == sign and not taken[b]:
+                    b += 1
+                # the smoothing itself broadens the run by about one sigma on each side
+                a2, b2 = a + s_pts, b - s_pts
+                if b2 <= a2:
+                    mid = a + int(np.argmax(np.abs(dd[a:b])))
+                    a2, b2 = mid, mid + 1
+                found.append((a2, b2, s, dd))
+                taken[a:b] = True
+        s *= factor
+    return found
+
+
 def detect_edges(
     x: np.ndarray,
     z: np.ndarray,
@@ -180,6 +285,7 @@ def detect_edges(
     min_step_nm: float = 0.0,
     margin_um: float | None = None,
     min_plane_um: float | None = None,
+    multiscale: bool = True,
 ) -> EdgeSet:
     """Find the step edges of a profile (see the module docstring)."""
     x = np.asarray(x, dtype=float)
@@ -209,9 +315,7 @@ def detect_edges(
     ext = np.abs(dd) > k_extend * sd
     raw_runs: list[list[int]] = []  # [start, stop, sign]
     # runs of each sign separately: two walls closer than the smoothing never merge
-    signed = [(a, b, 1) for a, b in runs(dd > k * sd)]
-    signed += [(a, b, -1) for a, b in runs(dd < -k * sd)]
-    for a, b, sign in sorted(signed):
+    for a, b, sign in _signed_runs(dd, k * sd):
         while a > 0 and ext[a - 1] and np.sign(dd[a - 1]) == sign:
             a -= 1
         while b < n and ext[b] and np.sign(dd[b]) == sign:
@@ -226,11 +330,11 @@ def detect_edges(
         else:
             raw_runs.append([a, b, sign])
 
-    def make_edge(a: int, b: int, manual: bool = False) -> Edge:
+    def make_edge(a: int, b: int, manual: bool = False, deriv: np.ndarray | None = None) -> Edge:
         lo = max(a - 1, 0)
         hi = min(b, n - 1)
         h = float(zs[hi] - zs[lo])
-        w = np.abs(dd[a:b])
+        w = np.abs((dd if deriv is None else deriv)[a:b])
         xc = float(np.sum(w * x[a:b]) / np.sum(w)) if w.sum() > 0 else float(x[(a + b) // 2])
         return Edge(
             start=a,
@@ -245,6 +349,16 @@ def detect_edges(
 
     edges = [make_edge(a, b) for a, b, _ in raw_runs]
     edges = [e for e in edges if abs(e.height_nm) >= h_thresh]
+    if multiscale and n >= 200:
+        taken = np.zeros(n, dtype=bool)
+        for e in edges:
+            taken[e.start : e.stop] = True
+        for a, b, s_c, dd_c in _coarse_runs(x, zf, valid, smooth, k, k_extend, taken):
+            e = make_edge(a, b, deriv=dd_c)
+            e.smooth_um = s_c
+            if abs(e.height_nm) >= h_thresh:
+                edges.append(e)
+        edges.sort(key=lambda e: e.start)
     exclude = np.zeros(n, dtype=bool)
     features: list[dict[str, Any]] = []
     edges = _dissolve_narrow(
@@ -265,11 +379,24 @@ def detect_edges(
             "derivative_sigma_nm_per_um": sd,
             "height_noise_nm": noise,
             "height_threshold_nm": h_thresh,
+            "multiscale": float(multiscale),
         },
         features=features,
     )
     _prune_small_steps(x, zf, eset, h_thresh, make_edge)
     eset.notices.extend(_segment_notices(x, eset))
+    for e in eset.edges:
+        if e.smooth_um is not None:
+            eset.notices.append(
+                Notice(
+                    N.WIDE_EDGE,
+                    N.INFO,
+                    f"the edge at {e.x_um:.4g} µm runs out over about {e.width_um:.3g} µm and was"
+                    f" found only with a {e.smooth_um:.3g} µm derivative smoothing (the base"
+                    f" smoothing is {smooth:.3g} µm)",
+                    {"x_um": e.x_um, "width_um": e.width_um, "smooth_um": e.smooth_um},
+                )
+            )
     for f in features:
         eset.notices.append(
             Notice(

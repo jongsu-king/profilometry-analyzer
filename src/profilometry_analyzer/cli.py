@@ -107,6 +107,16 @@ def _add_step(p: argparse.ArgumentParser) -> None:
     g.add_argument("--margin", type=float, help="edge margin (µm; default 2 stylus radii)")
     g.add_argument("--min-plane", type=float, help="shortest usable plane (µm)")
     g.add_argument("--burr-k", type=float, default=4.0, help="raised-point exclusion (sigma)")
+    g.add_argument(
+        "--single-scale",
+        action="store_true",
+        help="look for edges at the base smoothing only (no search for wide, gentle edges)",
+    )
+    g.add_argument(
+        "--no-widen",
+        action="store_true",
+        help="keep the detected transitions even when the plateau next to them is not flat",
+    )
     g.add_argument("--no-despike", action="store_true")
     g.add_argument("--spike-k", type=float, default=8.0)
 
@@ -133,6 +143,8 @@ def _step_settings(a: argparse.Namespace) -> StepSettings:
         margin_um=a.margin,
         min_plane_um=a.min_plane,
         burr_k=a.burr_k,
+        multiscale=not a.single_scale,
+        widen=not a.no_widen,
         tip_radius_um=a.tip_radius,
         stylus_force_mg=a.force,
         soft_film=a.soft,

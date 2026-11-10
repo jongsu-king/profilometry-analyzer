@@ -86,6 +86,32 @@ def test_edit_edges_and_cursors(window, demo: Path) -> None:  # type: ignore[no-
     w.chk_cursor_step.setChecked(False)
 
 
+def test_wide_edge_options(window, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    from profilometry_analyzer.synthetic import SynthSpec, synthesize, write_csv
+
+    w = window
+    syn = synthesize(
+        SynthSpec(kind="edge", length_um=2000, n_points=20_000, wall_um=200, noise_nm=1.0, seed=0)
+    )
+    f = write_csv(syn.profile, tmp_path / "wide_1.csv")
+    (key,) = w.add_files([f])
+    assert w.chk_multiscale.isChecked() and w.chk_widen.isChecked()
+    st = w.step_settings()
+    assert st.multiscale and st.widen
+    w.analyze_current()
+    on = w.scans[key].step
+    assert on.edges.edges[0].widened_um[0] > 0
+    assert on.thickness_nm == pytest.approx(100.0, abs=0.4)
+    w.chk_widen.setChecked(False)
+    w.chk_multiscale.setChecked(False)
+    st = w.step_settings()
+    assert not st.multiscale and not st.widen
+    w.analyze_current()
+    assert w.scans[key].step.edges.edges[0].widened_um == (0.0, 0.0)
+    w.chk_widen.setChecked(True)
+    w.chk_multiscale.setChecked(True)
+
+
 def test_batch_roughness_stress(window, demo: Path) -> None:  # type: ignore[no-untyped-def]
     w = window
     w.add_files(sorted(demo.glob("film*.csv")))

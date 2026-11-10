@@ -23,20 +23,51 @@ from profilometry_analyzer.synthetic import SynthSpec, synthesize
 N_SEEDS = 30
 
 
-def step_case(name: str, truth: float, settings: StepSettings | None = None, **kw: object) -> str:
+FIXED = StepSettings(multiscale=False, widen=False)
+"""The detection of the first version: one derivative smoothing, fixed edge margins."""
+
+
+TAIL_WARNINGS: list[int] = []
+
+
+def _errors(truth: float, settings: StepSettings | None, kw: dict) -> tuple[np.ndarray, np.ndarray]:
     err, z = [], []
+    TAIL_WARNINGS.clear()
     for seed in range(N_SEEDS):
-        syn = synthesize(SynthSpec(seed=1000 + seed, tip_radius_um=2.0, **kw))  # type: ignore[arg-type]
-        m = analyze_step(syn.profile, settings).measurement
-        assert m.value_nm is not None
+        syn = synthesize(SynthSpec(seed=1000 + seed, tip_radius_um=2.0, **kw))
+        res = analyze_step(syn.profile, settings)
+        TAIL_WARNINGS.append(int(any(n.code == "TRANSITION_TAIL" for n in res.notices)))
+        m = res.measurement
+        if m.value_nm is None:
+            err.append(math.nan)
+            z.append(math.nan)
+            continue
         e = m.value_nm - truth
         err.append(e)
         z.append(abs(e) / m.u_nm if m.u_nm else math.nan)
-    err_a, z_a = np.array(err), np.array(z)
+    return np.array(err), np.array(z)
+
+
+def _cells(err: np.ndarray, z: np.ndarray) -> str:
+    found = np.isfinite(err)
+    if not found.any():
+        return "not found | - | -"
+    miss = "" if found.all() else f" ({int((~found).sum())} not found)"
     return (
-        f"| {name} | {truth:g} | {np.mean(err_a):+.3f} | {np.max(np.abs(err_a)):.3f} |"
-        f" {np.mean(z_a < 2):.0%} |"
+        f"{np.nanmean(err):+.3f}{miss} | {np.nanmax(np.abs(err)):.3f} | {np.mean(z[found] < 2):.0%}"
     )
+
+
+def step_case(name: str, truth: float, settings: StepSettings | None = None, **kw: object) -> str:
+    err, z = _errors(truth, settings, kw)
+    return f"| {name} | {truth:g} | {_cells(err, z)} |"
+
+
+def wide_case(name: str, truth: float, **kw: object) -> str:
+    spec = {"kind": "edge", "length_um": 2000.0, "n_points": 20_000, "height_nm": truth, **kw}
+    before = _cells(*_errors(truth, FIXED, spec))
+    after = _cells(*_errors(truth, None, spec))
+    return f"| {name} | {truth:g} | {before} | {after} | {sum(TAIL_WARNINGS)}/{N_SEEDS} |"
 
 
 def main() -> None:
@@ -92,17 +123,32 @@ def main() -> None:
             noise_nm=0.4,
         )
     )
-    print(
-        step_case(
-            "film edge, correlated roughness Rq 2 nm (5 µm)",
-            100.0,
-            kind="edge",
-            height_nm=100.0,
-            noise_nm=0.5,
-            roughness_nm=2.0,
-            roughness_corr_um=5.0,
+    for corr in (5.0, 20.0):
+        print(
+            step_case(
+                f"film edge, correlated roughness Rq 2 nm ({corr:g} µm)",
+                100.0,
+                kind="edge",
+                height_nm=100.0,
+                noise_nm=0.5,
+                roughness_nm=2.0,
+                roughness_corr_um=corr,
+            )
         )
+    print(
+        "\nWide, gently running-out film edges in a 2 mm scan (noise 1 nm, tilt"
+        " 0.03 nm/µm); first version (one smoothing, fixed margins) against the default"
+        " (multi-scale detection, widened transitions):\n"
     )
+    print(
+        "| wall | true (nm) | fixed: mean error | max abs | < 2u |"
+        " default: mean error | max abs | < 2u | TRANSITION_TAIL warning |"
+    )
+    print("|---|---|---|---|---|---|---|---|---|")
+    common = {"noise_nm": 1.0, "tilt_nm_per_um": 0.03}
+    for wall in (50.0, 100.0, 200.0, 400.0):
+        print(wide_case(f"logistic, 10-90 % over {wall:g} µm", 100.0, wall_um=wall, **common))
+    print(wide_case("straight ramp, 600 µm", 100.0, wall_um=600.0, wall_shape="ramp", **common))
     print("\nAnalytical checks:\n")
     A, lam = 10.0, 20.0
     x = np.linspace(0, 6000, 60_000)

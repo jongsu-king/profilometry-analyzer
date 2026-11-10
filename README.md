@@ -20,8 +20,8 @@ profilometers (written for a Bruker DektakXT-E) and generic two-column tables.
 |---|---|
 | Read | CSV / TXT / TSV / xlsx; header and metadata lines found automatically; units from the header (Å, nm, µm, mm) or **assumed with a warning**; stylus force, scan length, speed and stylus radius kept when the file has them. The values as read are never changed. |
 | Level | Manual: two reference regions (like the R and M cursors of the instrument software), on one level or on separate levels. Automatic: edges masked by a smoothed derivative, then a robust (Huber or RANSAC) line shared by all plateaus with one offset per plateau. Bow: optional polynomial (order 2–6), a separate, recorded step. |
-| Step height | Edge detection from the smoothed derivative against a noise threshold; classification into film edge, groove (scratch), ridge (stripe), staircase, periodic lines. Film edge: a line on each plateau, transition zone (default two stylus radii) excluded, height at the half-height point. Groove and ridge: **ISO 5436-1 type A1** evaluation. Raised burrs beyond k·σ are excluded and reported. |
-| Uncertainty | From the regression residuals (inflated by the integrated autocorrelation time of the residuals) and from the slope difference of the two planes; several scans: mean, standard deviation and n per sample. |
+| Step height | Edge detection from the smoothed derivative against a noise threshold; classification into film edge, groove (scratch), ridge (stripe), staircase, periodic lines. Film edge: a line on each plateau, transition zone (default two stylus radii) excluded, height at the half-height point. **Wide, gently running-out edges** (tapered or shadowed film edges) are found with wider derivative smoothings, and a transition is widened while the plateau next to it still runs towards the other level. Groove and ridge: **ISO 5436-1 type A1** evaluation. Raised burrs beyond k·σ are excluded and reported. |
+| Uncertainty | From the regression residuals, inflated by the autocorrelation time of the residuals of all planes pooled and corrected for the fitted lines; from the slope difference of the two planes; and, next to a widened transition, from the tail the test could not resolve. Several scans: mean, standard deviation and n per sample. |
 | Roughness | ISO 21920-2 Ra, Rq, Rz, Rp, Rv, Rt, Rsk, Rku, Rsm after an ISO 16610-21 Gaussian filter (λs and λc); default cut-offs from the ISO 21920-3 setting classes; warnings for coarse sampling and short evaluation lengths. |
 | Film stress | Stoney equation from the curvature of quadratic fits to long scans before and after deposition; substrate table (Si(100), Si(111), glasses) with sources, editable. |
 | Batch | Every scan of a folder, grouped by sample from the file name: n, mean, SD, SE, CV and the 95 % confidence interval of the mean (Student t) per sample; column chart with error bars and the individual scans. |
@@ -33,7 +33,8 @@ Each result carries coded notices (repeated in every table, figure and project f
 example `UNIT_ASSUMED`, `NARROW_FEATURE` (structure narrower than the stylus can trace),
 `SMALL_STEP` (near the 20 nm lower end of the vertical range), `SOFT_FILM_HIGH_FORCE`
 (soft film scanned with more than 3 mg), `BURR_EXCLUDED`, `NONPARALLEL_PLANES`,
-`CORRELATED_RESIDUALS`, `EVALUATION_TOO_SHORT`, `SAMPLING_TOO_COARSE`, `STONEY_THICK_FILM`,
+`CORRELATED_RESIDUALS`, `TRANSITION_TAIL` (the plateau is still inside the tail of a very
+wide edge), `EVALUATION_TOO_SHORT`, `SAMPLING_TOO_COARSE`, `STONEY_THICK_FILM`,
 `CURVATURE_CHANGE_NOT_SIGNIFICANT`. The full list is in
 [`notices.py`](src/profilometry_analyzer/notices.py).
 
@@ -124,7 +125,20 @@ Details and references: [`docs/methods.md`](docs/methods.md).
 * **Edges** – Gaussian-smoothed derivative (σ = one stylus radius by default); an edge
   needs `|dz/dx − median| > 6 σ_d` and a height change above 5× the height noise.
   Plateaus shorter than three stylus radii after the margins are dissolved (burr tops,
-  dust, narrow lines) and reported as narrow features.
+  dust, narrow lines) and reported as narrow features. The derivative is computed again
+  with 3, 9, 27 … times wider smoothings (up to 1/40 of the scan, a robust line through
+  the derivative removed so that tilt and bow do not count) to find wide, gentle edges
+  (`WIDE_EDGE`); `--single-scale` turns this off.
+* **Wide transitions** – for each side of each edge the block of the plateau next to the
+  edge is compared with the line through the rest of the plateau; while it lies more
+  than 3 standard errors towards the other level, it is added to the transition
+  (`TRANSITION_WIDENED`), at most half the plateau. A transition that takes a quarter of
+  a plateau or more gives `TRANSITION_TAIL`. `--no-widen` turns this off.
+* **Uncertainty** – the residuals of a line fitted over a plane only a few correlation
+  lengths long decorrelate too fast. The autocorrelation of all planes' residuals is
+  pooled, corrected for the fitted parameters (`ρ = ρ̂(1 − f) + f`, `f = P·τ/n`) and
+  described by a correlated fraction and a 1/e length (exponential model, iterated
+  with `f`).
 * **ISO 5436-1 A1** – groove width W between the half-height points, centre c; upper
   level = one line over c ± 1.5 W without the groove and W/3 next to each edge; lower
   level = central third of the groove; depth = upper line minus lower line at c. The
@@ -157,12 +171,36 @@ with a 2 µm spherical stylus; 30 noise realisations per case, default settings:
 | scratch (A1), W 180 µm, burrs 80 nm, tilt | 250 | +0.015 | 0.072 | 100 % |
 | ridge (A1), W 120 µm | 60 | −0.004 | 0.027 | 100 % |
 | periodic lines, period 100 µm | 45 | −0.001 | 0.030 | 100 % |
-| film edge, correlated roughness Rq 2 nm (5 µm) | 100 | −0.142 | 2.994 | 80 % |
+| film edge, correlated roughness Rq 2 nm (5 µm) | 100 | −0.142 | 2.994 | 90 % |
+| film edge, correlated roughness Rq 2 nm (20 µm) | 100 | −0.101 | 5.371 | 90 % |
 
-With white noise the single-scan uncertainty u is well calibrated. With roughness
-correlated over a few percent of the plane length u is **too small** (here 80 % instead
-of 95 % within 2u); such scans carry `CORRELATED_RESIDUALS`. Use the scatter of several
-scans (batch table) as the uncertainty of a film thickness.
+With white noise the single-scan uncertainty u is well calibrated (200 realisations:
+error SD 0.0208 nm, mean u 0.0213 nm). With roughness correlated over a few percent of
+the plane length the first version's u was too small (80 % within 2u at 5 µm; the
+standardised error had SD 1.8 at 20 µm). The pooled, corrected autocorrelation time
+brings this to 90 % for both lengths in the table above (60 other realisations:
+SD of the standardised error 0.77 at 5 µm and 0.94 at 20 µm). Such scans still carry
+`CORRELATED_RESIDUALS`: with five independent points per plane u rests on the assumed
+shape of the correlation. Use the scatter of several scans (batch table) as the
+uncertainty of a film thickness.
+
+**Wide, gently running-out edges** in a 2 mm scan (noise 1 nm, tilt 0.03 nm/µm, 30
+realisations each). "Fixed" is the detection of the first version (one smoothing, fixed
+margins; `--single-scale --no-widen`, with the current uncertainty), "default" the
+current one:
+
+| wall | true (nm) | fixed: mean error | max abs | < 2u | default: mean error | max abs | < 2u | `TRANSITION_TAIL` |
+|---|---|---|---|---|---|---|---|---|
+| logistic, 10–90 % over 50 µm | 100 | −0.097 | 0.138 | 10 % | −0.019 | 0.082 | 97 % | 0/30 |
+| logistic, 10–90 % over 100 µm | 100 | −0.538 | 0.699 | 0 % | −0.050 | 0.117 | 93 % | 0/30 |
+| logistic, 10–90 % over 200 µm | 100 | −2.045 | 2.256 | 0 % | −0.113 | 0.301 | 93 % | 6/30 |
+| logistic, 10–90 % over 400 µm | 100 | −16.4 (28 of 30 not found) | 24.0 | 0 % | −0.749 | 1.434 | 17 % | 30/30 |
+| straight ramp, 600 µm | 100 | not found | – | – | −0.004 | 0.140 | 97 % | 0/30 |
+
+A logistic edge has exponential tails, the hardest shape for this test. When the edge
+is so wide that the plateaus never become flat inside the scan (400 µm in 2 mm) the
+height still reads about 0.75 % low; every such scan carries `TRANSITION_TAIL`. Scan
+farther onto both levels in that case.
 
 **Analytical cases.**
 
@@ -178,8 +216,9 @@ from the Incheon National University core facility (Bruker DEKTAK XT-E, CSV and 
 possible OPDx) and the step and roughness values Vision64 reported for the same scans
 has not been done. Until it is, do not treat the results as validated for real data.
 
-**Quality.** `pytest` (94 tests), `ruff` and `mypy` pass; CI runs on Windows, macOS and
-Linux with Python 3.11, 3.12 and 3.13.
+**Quality.** `pytest` (131 tests), `ruff` and `mypy` pass (locally on Python 3.11 with
+numpy 2.4 and Python 3.12 with numpy 2.5); CI runs on Windows, macOS and Linux with
+Python 3.11, 3.12 and 3.13.
 
 ## Reproducibility
 

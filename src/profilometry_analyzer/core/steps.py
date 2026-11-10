@@ -25,9 +25,16 @@ Uncertainty
 -----------
 ``u_fit`` combines the covariances of the two lines at the evaluation point; the
 covariances are inflated for correlated residuals (roughness, smoothing) through the
-effective number of points.  ``u_slope = |m_2 - m_1| * gap / 2`` is the change of the
+effective number of points ``n / tau``.  ``tau`` comes from the residuals of all planes
+of the measurement pooled, corrected for the lines fitted to them
+(:func:`~profilometry_analyzer.core.stats.correlation_time`); a plane keeps its own
+estimate when that is larger.  ``u_slope = |m_2 - m_1| * gap / 2`` is the change of the
 height difference across the excluded gap between the two fitted regions when the
-planes are not parallel.  ``u = sqrt(u_fit^2 + u_slope^2)`` is a standard uncertainty
+planes are not parallel.  ``u_tail`` is non-zero only next to a transition that was
+widened (:func:`widen_transitions`): the mean offset towards the other level that the
+block next to the edge still shows, summed over both sides - the part of a gently
+running-out edge that the test could not resolve.
+``u = sqrt(u_fit^2 + u_slope^2 + u_tail^2)`` is a standard uncertainty
 (k = 1) of this one scan; it does not contain the instrument calibration or the
 scatter between positions on the sample (use several scans and the batch table).
 """
@@ -42,8 +49,8 @@ import numpy as np
 from .. import notices as N
 from ..instrument import DEFAULT_INSTRUMENT, InstrumentSpec
 from ..notices import Notice
-from .edges import Edge, EdgeSet
-from .stats import LineFit, fit_line, mad_sigma, runs
+from .edges import Edge, EdgeSet, build_segments
+from .stats import LineFit, correlation_time, fit_line, mad_sigma, runs
 
 
 @dataclass
@@ -58,6 +65,8 @@ class PlaneFit:
     used: np.ndarray | None = None
     mask: np.ndarray | None = None
     """Points offered to the fit (``used`` is the subset that stayed in it)."""
+    correlation: dict[str, float] | None = None
+    """Pooled residual correlation applied to the covariance (:func:`calibrate_planes`)."""
 
     @property
     def slope(self) -> float:
@@ -72,7 +81,46 @@ class PlaneFit:
             "n_excluded": self.n_excluded,
             "burrs": list(self.burrs),
             **self.line.to_dict(),
+            "tau_points": self.line.tau,
         }
+
+
+def calibrate_planes(
+    x: np.ndarray, z: np.ndarray, planes: list[PlaneFit | None], *, min_run: int = 8
+) -> dict[str, float]:
+    """Inflate the line covariances for the residual correlation of all planes pooled.
+
+    The planes of one profile sample the same surface process, so their residuals are
+    pooled for the autocorrelation time (corrected for the two parameters of every
+    line).  A plane whose own estimate is larger keeps it.  Returns the pooled estimate,
+    with the correlation length in µm.
+    """
+    good = [p for p in planes if p is not None and p.used is not None]
+    pieces: list[np.ndarray] = []
+    for p in good:
+        assert p.used is not None
+        r = z - p.line.at(x)
+        pieces += [r[a:b] for a, b in runs(p.used) if b - a >= min_run]
+    info = correlation_time(pieces, n_params=2 * max(len(good), 1))
+    dx = float(np.median(np.diff(x))) if x.size > 1 else 0.0
+    info["e_folding_um"] = info["e_folding_points"] * dx
+    for p in good:
+        if info["tau"] > p.line.tau:
+            p.line = p.line.with_tau(info["tau"])
+        p.correlation = info
+    return info
+
+
+def _raised_runs(grow: np.ndarray, hits: np.ndarray) -> np.ndarray:
+    """The runs of ``grow`` that contain at least one point of ``hits``."""
+    if not hits.any():
+        return np.zeros_like(grow)
+    g = grow.astype(np.int8)
+    starts = np.diff(np.concatenate([[0], g])) == 1
+    label = np.cumsum(starts) * g
+    keep = np.unique(label[hits & grow])
+    keep = keep[keep > 0]
+    return np.asarray(np.isin(label, keep) & grow)
 
 
 def fit_plane(
@@ -88,8 +136,10 @@ def fit_plane(
     """Line through the points of ``mask`` with points beyond ``k`` sigma excluded.
 
     Raised runs (residual above ``+k`` sigma) are grown outwards until the residual
-    falls below one sigma, so the whole burr - not only its top - is excluded, and they
-    are returned in ``burrs``.  ``None`` when fewer than three points are available.
+    falls below one sigma, so the whole burr - not only its top - is excluded.  Runs
+    with at least ``min_burr_points`` points above two sigmas are returned in ``burrs``
+    (a single noise point beyond ``k`` sigmas is excluded but not reported).  ``None``
+    when fewer than three points are available.
     """
     mask = np.asarray(mask, dtype=bool)
     if mask.sum() < 3:
@@ -104,12 +154,7 @@ def fit_plane(
         if not s > 0:
             break
         out = mask & (np.abs(r) > k * s)
-        grow = mask & (r > 1.0 * s)
-        raised = np.zeros_like(out)
-        for a, b in runs(grow):
-            if np.any(out[a:b] & (r[a:b] > 0)):
-                raised[a:b] = True
-        out |= raised
+        out |= _raised_runs(mask & (r > 1.0 * s), out & (r > 0))
         new = mask & ~out
         if new.sum() < 3 or np.array_equal(new, inl):
             break
@@ -120,8 +165,8 @@ def fit_plane(
     if s > 0:
         raised = mask & ~inl & (r > 0)
         for a, b in runs(raised):
-            if b - a < min_burr_points:
-                continue  # a single noisy point is not a burr (it is still excluded)
+            if int(np.sum(r[a:b] > 2.0 * s)) < min_burr_points:
+                continue  # a noisy point and its neighbours are not a burr (still excluded)
             j = a + int(np.argmax(r[a:b]))
             burrs.append(
                 {
@@ -146,7 +191,9 @@ def fit_plane(
     )
 
 
-def _difference(a: PlaneFit, b: PlaneFit, x_at: float, gap_um: float) -> dict[str, float]:
+def _difference(
+    a: PlaneFit, b: PlaneFit, x_at: float, gap_um: float, u_tail: float = 0.0
+) -> dict[str, float]:
     """``b - a`` at ``x_at`` with its uncertainty components."""
     h = float(b.line.at(x_at) - a.line.at(x_at))
     u_fit = float(np.sqrt(a.line.var_at(x_at) + b.line.var_at(x_at)))
@@ -155,9 +202,10 @@ def _difference(a: PlaneFit, b: PlaneFit, x_at: float, gap_um: float) -> dict[st
     u_slope = abs(dm) * max(gap_um, 0.0) / 2.0
     return {
         "height_nm": h,
-        "u_nm": float(np.hypot(u_fit, u_slope)),
+        "u_nm": float(np.sqrt(u_fit**2 + u_slope**2 + u_tail**2)),
         "u_fit_nm": u_fit,
         "u_slope_nm": float(u_slope),
+        "u_tail_nm": float(u_tail),
         "slope_difference_nm_per_um": dm,
         "slope_difference_std": u_dm,
         "x_um": float(x_at),
@@ -178,6 +226,7 @@ class StepMeasurement:
     u_nm: float | None
     u_fit_nm: float | None = None
     u_slope_nm: float | None = None
+    u_tail_nm: float | None = None
     position_um: float | None = None
     width_um: float | None = None
     planes: list[PlaneFit] = field(default_factory=list)
@@ -199,6 +248,7 @@ class StepMeasurement:
             "u_nm": self.u_nm,
             "u_fit_nm": self.u_fit_nm,
             "u_slope_nm": self.u_slope_nm,
+            "u_tail_nm": self.u_tail_nm,
             "position_um": self.position_um,
             "width_um": self.width_um,
             "planes": [p.to_dict() for p in self.planes],
@@ -239,6 +289,237 @@ def refine_edges(x: np.ndarray, z: np.ndarray, eset: EdgeSet, *, k: float = 4.0)
         e.x_um = float(xs[j] + t * (xs[j + 1] - xs[j]))
 
 
+def widen_transitions(
+    x: np.ndarray,
+    z: np.ndarray,
+    eset: EdgeSet,
+    *,
+    k: float = 4.0,
+    k_tail: float = 3.0,
+    block_fraction: float = 0.1,
+    max_fraction: float = 0.5,
+    warn_fraction: float = 0.25,
+    max_passes: int = 3,
+) -> list[Notice]:
+    """Widen every transition while the plateau next to it still runs towards the other
+    level.
+
+    A film edge that runs out gently (a tapered or shadowed edge) leaves a tail on both
+    plateaus that a fixed margin does not remove; the tail pulls the plane fits towards
+    each other and the step comes out too small.  For each side of each edge a reference
+    line is fitted to the plateau without the block next to the edge (``block_fraction``
+    of the plateau, at least ten points), and the block is compared with it.  While the
+    block mean lies more than ``k_tail`` standard errors towards the other level
+    (residual correlation allowed for), the block is added to the transition and the
+    next block is tested; blocks of 0.2, 0.5 and 1 times that length
+    are tried and the shortest that shows the tail is taken (a short tail is diluted in
+    a long block, a long weak tail is lost in the noise of a short one).  Widening stops
+    at ``max_fraction`` of the plateau.  A ``TRANSITION_TAIL`` warning is given when the
+    plateau still bends there, or when ``warn_fraction`` of a plateau had to be added:
+    then the rest of the plateau is probably still inside the tail (in the synthetic
+    tests a 400 µm wide edge in a 2 mm scan took 29-48 % and still read 0.75 % low).
+    Points more than ``k`` sigmas *away* from the other level (burrs, particles on the
+    high side) stay out of the block mean; they cannot be the tail of the edge.
+
+    The edge extents and the plateaus of ``eset`` are updated in place; the notices say
+    what changed.
+    """
+    if not eset.edges:
+        return []
+    dx = float(np.median(np.diff(x))) if x.size > 1 else 1.0
+    tau_pool = _far_correlation(x, z, eset, k)
+    first_len: dict[tuple[int, int], float] = {}
+    done: dict[tuple[int, int], float] = {}
+    limited: set[tuple[int, int]] = set()
+
+    def plateau(i: int, side: int) -> np.ndarray:
+        return eset.usable(eset.segments[i + side])
+
+    for i in range(len(eset.edges)):
+        for side in (0, 1):
+            xs = x[plateau(i, side)]
+            first_len[(i, side)] = float(xs[-1] - xs[0]) if xs.size > 1 else 0.0
+            done[(i, side)] = 0.0
+
+    for _ in range(max_passes):
+        changed = False
+        for i, e in enumerate(eset.edges):
+            for side in (0, 1):
+                key = (i, side)
+                length0 = first_len[key]
+                blocks = sorted(
+                    {max(f * block_fraction * length0, 10.0 * dx) for f in (0.2, 0.5, 1.0)}
+                )
+                toward = e.sign if side == 0 else -e.sign
+                while True:
+                    mask = plateau(i, side)
+                    xs = x[mask]
+                    if xs.size < 20:
+                        break
+                    # the smallest block that shows the tail: short tails are diluted in a
+                    # long block, long tails are too weak in a short one
+                    block = next(
+                        (
+                            b
+                            for b in blocks
+                            if _tail_left(x, z, mask, side, b, toward, k, k_tail, tau_pool)
+                        ),
+                        0.0,
+                    )
+                    if not block:
+                        break
+                    room = done[key] + block <= max_fraction * length0 and (
+                        float(xs[-1] - xs[0]) - block >= max(eset.min_plane_um, 10.0 * dx)
+                    )
+                    if not room:
+                        limited.add(key)
+                        break
+                    _move_boundary(x, eset, i, side, block)
+                    done[key] += block
+                    changed = True
+        if not changed:
+            break
+
+    notes: list[Notice] = []
+    widened = []
+    for i, e in enumerate(eset.edges):
+        left, right = done[(i, 0)], done[(i, 1)]
+        e.widened_um = (left, right)
+        if left or right:
+            widened.append({"edge": i + 1, "x_um": e.x_um, "left_um": left, "right_um": right})
+    if widened:
+        text = "; ".join(
+            f"edge {w['edge']} at {w['x_um']:.4g} µm by {w['left_um']:.3g} µm left and"
+            f" {w['right_um']:.3g} µm right"
+            for w in widened
+        )
+        notes.append(
+            Notice(
+                N.TRANSITION_WIDENED,
+                N.INFO,
+                "the plateaus were not yet flat next to the transitions (a gently running-out"
+                f" edge), so the transitions were widened: {text}",
+                {"edges": widened},
+            )
+        )
+    long = {
+        key for key, d in done.items() if first_len[key] > 0 and d >= warn_fraction * first_len[key]
+    }
+    for i, side in sorted(limited | long):
+        e = eset.edges[i]
+        where = "left" if side == 0 else "right"
+        d = done[(i, side)]
+        share = 100.0 * d / first_len[(i, side)] if first_len[(i, side)] > 0 else 0.0
+        if (i, side) in limited:
+            why = f"still bends towards the other level after {d:.3g} µm ({share:.0f} %) were"
+        else:
+            why = f"needed {d:.3g} µm ({share:.0f} % of it) to be"
+        notes.append(
+            Notice(
+                N.TRANSITION_TAIL,
+                N.WARNING,
+                f"the plateau {where} of the edge at {e.x_um:.4g} µm {why} added to the"
+                " transition: the rest of the plateau is probably still inside the tail of a"
+                " very wide edge (or a bow is left in the profile, or the film slopes) and the"
+                " height may be too small by more than its uncertainty. Scan farther onto"
+                " both levels, try a higher bow order or set the regions by hand",
+                {"edge": i + 1, "side": where, "widened_um": d, "share_percent": share},
+            )
+        )
+    return notes
+
+
+def _far_correlation(x: np.ndarray, z: np.ndarray, eset: EdgeSet, k: float) -> float:
+    """Residual autocorrelation time from the half of every plateau farthest from its
+    edges.  A tail next to an edge is a smooth, one-sided deviation; in the residuals of
+    the whole plateau it looks like long-range correlation and would hide itself by
+    inflating the standard error of the test."""
+    planes: list[PlaneFit | None] = []
+    last = len(eset.segments) - 1
+    for j, seg in enumerate(eset.segments):
+        m = eset.usable(seg)
+        xs = x[m]
+        if xs.size < 20:
+            continue
+        a, b = float(xs[0]), float(xs[-1])
+        quarter = 0.25 * (b - a)
+        if j == 0:
+            far = m & (x <= a + 2 * quarter)
+        elif j == last:
+            far = m & (x >= b - 2 * quarter)
+        else:
+            far = m & (x >= a + quarter) & (x <= b - quarter)
+        planes.append(fit_plane(x, z, far, name="", k=k))
+    return float(calibrate_planes(x, z, planes)["tau"]) if planes else 1.0
+
+
+def _tail_stat(
+    x: np.ndarray,
+    z: np.ndarray,
+    mask: np.ndarray,
+    side: int,
+    block: float,
+    toward: int,
+    k: float,
+    tau_pool: float,
+) -> tuple[float, float]:
+    """Mean offset (towards the other level) of the block of ``mask`` next to the edge
+    from the line through the rest of the plateau, and its standard error."""
+    xs = x[mask]
+    inner = mask & (x > xs[-1] - block) if side == 0 else mask & (x < xs[0] + block)
+    outer = mask & ~inner
+    if inner.sum() < 5 or outer.sum() < 10:
+        return 0.0, float("inf")
+    ref = fit_plane(x, z, outer, name="", k=k)
+    if ref is None or ref.n_used < 10:
+        return 0.0, float("inf")
+    line = ref.line.with_tau(max(ref.line.tau, tau_pool))
+    r = toward * (z[inner] - line.at(x[inner]))
+    s = max(line.sigma, 1e-12)
+    keep = r >= -k * s
+    nb = int(keep.sum())
+    if nb < 5:
+        return 0.0, float("inf")
+    tau = line.tau
+    xm = float(np.mean(x[inner][keep]))
+    se = float(np.sqrt(s * s * min(tau, nb) / nb + line.var_at(xm)))
+    return float(np.mean(r[keep])), se
+
+
+def _tail_left(
+    x: np.ndarray,
+    z: np.ndarray,
+    mask: np.ndarray,
+    side: int,
+    block: float,
+    toward: int,
+    k: float,
+    k_tail: float,
+    tau_pool: float,
+) -> bool:
+    """Whether the block next to the edge lies more than ``k_tail`` standard errors
+    towards the other level."""
+    dev, se = _tail_stat(x, z, mask, side, block, toward, k, tau_pool)
+    return bool(np.isfinite(se) and dev > k_tail * se)
+
+
+def _move_boundary(x: np.ndarray, eset: EdgeSet, i: int, side: int, block: float) -> None:
+    """Grow edge ``i`` by ``block`` into the plateau on ``side`` and rebuild the plateaus."""
+    e = eset.edges[i]
+    n = x.size
+    if side == 0:
+        floor = eset.edges[i - 1].stop if i > 0 else 0
+        new = int(np.searchsorted(x, x[e.start] - block))
+        e.start = max(min(new, e.start - 1), floor)
+        e.x_start_um = float(x[e.start])
+    else:
+        ceil = eset.edges[i + 1].start if i + 1 < len(eset.edges) else n
+        new = int(np.searchsorted(x, x[e.stop - 1] + block, side="right"))
+        e.stop = min(max(new, e.stop + 1), ceil)
+        e.x_stop_um = float(x[e.stop - 1])
+    eset.segments = build_segments(x, eset.edges, eset.margin_um)
+
+
 def measure_edges(
     x: np.ndarray, z: np.ndarray, eset: EdgeSet, *, k: float = 4.0
 ) -> tuple[list[PlaneFit | None], list[dict[str, Any]]]:
@@ -246,6 +527,7 @@ def measure_edges(
     planes: list[PlaneFit | None] = []
     for seg in eset.segments:
         planes.append(fit_plane(x, z, eset.usable(seg), name=f"plateau {seg.label + 1}", k=k))
+    calibrate_planes(x, z, planes)
     per_edge: list[dict[str, Any]] = []
     for i, e in enumerate(eset.edges):
         a, b = planes[i], planes[i + 1]
@@ -254,7 +536,14 @@ def measure_edges(
             row.update({"height_nm": None, "u_nm": None, "note": "plateau too short"})
         else:
             gap = b.x_start_um - a.x_stop_um
-            row.update(_difference(a, b, e.x_um, gap))
+            u_tail = 0.0
+            for side, plane, toward in ((0, a, e.sign), (1, b, -e.sign)):
+                if e.widened_um[side] > 0 and plane.mask is not None:
+                    xs = x[plane.mask]
+                    block = max(0.1 * float(xs[-1] - xs[0]), 10.0 * float(np.median(np.diff(x))))
+                    dev, _ = _tail_stat(x, z, plane.mask, side, block, toward, k, plane.line.tau)
+                    u_tail += max(dev, 0.0)
+            row.update(_difference(a, b, e.x_um, gap, u_tail))
             row["direction"] = "up" if row["height_nm"] > 0 else "down"
         per_edge.append(row)
     return planes, per_edge
@@ -281,10 +570,10 @@ def _burr_notices(planes: list[PlaneFit], k: float) -> list[Notice]:
 def _correlation_notices(planes: list[PlaneFit], limit: float = 30.0) -> list[Notice]:
     """Warn when a plane has few independent points (long-range correlated roughness).
 
-    In synthetic tests the single-scan uncertainty is well calibrated for white noise but
-    too small by a factor 1.2-2.3 when the roughness is correlated over a few percent of
-    the plane length, because the autocorrelation estimated from the residuals of a short
-    plane misses its long tail.
+    The pooled, corrected autocorrelation time (:func:`calibrate_planes`) kept 95 % of
+    the synthetic errors within 2u for roughness correlated over 20 µm on 450 µm planes
+    (about five independent points per plane), but with so few independent points the
+    uncertainty rests on the assumed shape of the correlation.
     """
     weak = [p for p in planes if p.line.n_eff < limit]
     if not weak:
@@ -296,8 +585,8 @@ def _correlation_notices(planes: list[PlaneFit], limit: float = 30.0) -> list[No
             N.CORRELATED_RESIDUALS,
             N.WARNING,
             f"the {worst.name} plane has only about {worst.line.n_eff:.0f} independent points"
-            f" (residuals correlated over ~{corr:.3g} µm): the single-scan uncertainty may be"
-            " too small - use the scatter of several scans",
+            f" (residuals correlated over ~{corr:.3g} µm): the single-scan uncertainty rests on"
+            " a model of that correlation - prefer the scatter of several scans",
             {"plane": worst.name, "n_eff": worst.line.n_eff},
         )
     ]
@@ -355,6 +644,7 @@ def measure_single_edge(
         u_nm=row["u_nm"],
         u_fit_nm=row["u_fit_nm"],
         u_slope_nm=row["u_slope_nm"],
+        u_tail_nm=row["u_tail_nm"],
         position_um=e.x_um,
         width_um=e.width_um,
         planes=[a, b],
@@ -469,6 +759,7 @@ def measure_a1(
         )
     outer = fit_plane(x, z, outer_m, name="upper" if kind == "groove" else "base", k=k)
     inner = fit_plane(x, z, inner_m, name="bottom" if kind == "groove" else "top", k=k)
+    calibrate_planes(x, z, [outer, inner])
     regions = {
         "outer": [tuple(r) for r in info["outer_um"]],
         "inner": [tuple(r) for r in info["inner_um"]],
@@ -662,6 +953,7 @@ def measure_regions(
     b = fit_plane(x, z, mb, name="measurement B", k=k)
     if a is None or b is None:
         raise ValueError("each region needs at least three valid points")
+    calibrate_planes(x, z, [a, b])
     if a.x_stop_um <= b.x_start_um:
         x_at, gap = 0.5 * (a.x_stop_um + b.x_start_um), b.x_start_um - a.x_stop_um
     elif b.x_stop_um <= a.x_start_um:
