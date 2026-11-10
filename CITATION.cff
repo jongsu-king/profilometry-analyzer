@@ -4,6 +4,7 @@ title: "Profilometry Analyzer"
 abstract: "Reproducible step height, film thickness, ISO 21920-2 roughness and Stoney film stress from stylus profilometer line scans."
 type: software
 version: 0.1.0
+date-released: "2026-11-10"
 license: MIT
 repository-code: "https://github.com/jongsu-king/profilometry-analyzer"
 url: "https://github.com/jongsu-king/profilometry-analyzer"
