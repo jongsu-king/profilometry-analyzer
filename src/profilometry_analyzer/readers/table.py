@@ -10,8 +10,9 @@ same for every format:
 * the text row directly above a block is its header, unless it holds only units, in
   which case it is the unit row and the header is the row above;
 * every other text row is kept as metadata (``key: value``, ``key, value`` or
-  ``key<TAB>value``); stylus force, scan length, speed, stylus radius, number of points
-  and date are recognised by generic words and converted to mg, µm, µm/s.
+  ``key<TAB>value``); stylus force, scan length, speed, stylus radius and cone angle,
+  number of points and date are recognised by generic words and converted to mg, µm,
+  µm/s and degrees.
 """
 
 from __future__ import annotations
@@ -188,6 +189,15 @@ def scan_info_from_metadata(meta: dict[str, str]) -> tuple[ScanInfo, list[str]]:
                 info.set("stylus_force_mg", num * 1e3 / 9.80665, f"file: {key} (mN -> mg)")
             else:
                 notes.append(f"force unit {unit!r} in {key!r} not understood")
+        elif (
+            "angle" in k
+            and any(w in k for w in ("cone", "stylus", "tip"))
+            and info.cone_angle_deg is None
+        ):
+            if u in ("", "deg", "°", "degree", "degrees"):
+                info.set("cone_angle_deg", num, f"file: {key}")
+            else:
+                notes.append(f"angle unit {unit!r} in {key!r} not understood")
         elif "radius" in k and info.tip_radius_um is None:
             factor = _LENGTH_TO_UM.get(u, 1.0 if u == "" else None)
             if factor is None:

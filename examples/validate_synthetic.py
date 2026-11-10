@@ -12,11 +12,14 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 from profilometry_analyzer.analysis import StepSettings, analyze_step
 from profilometry_analyzer.core.filters import mean_line, transmission
 from profilometry_analyzer.core.roughness import RoughnessSettings, roughness
+from profilometry_analyzer.core.stats import runs
 from profilometry_analyzer.core.stress import M_SI100, stoney_mpa
+from profilometry_analyzer.core.tip import Tip, check_tip, dilate
 from profilometry_analyzer.profile import Profile
 from profilometry_analyzer.synthetic import SynthSpec, synthesize
 
@@ -68,6 +71,166 @@ def wide_case(name: str, truth: float, **kw: object) -> str:
     before = _cells(*_errors(truth, FIXED, spec))
     after = _cells(*_errors(truth, None, spec))
     return f"| {name} | {truth:g} | {before} | {after} | {sum(TAIL_WARNINGS)}/{N_SEEDS} |"
+
+
+TIP = Tip(2.0, 60.0)
+
+
+def tall_step_case(height: float) -> str:
+    """Vertical step traced by a 2 µm, 60° stylus: hidden foot and height."""
+    foot, err, z, flank = [], [], [], 0
+    for seed in range(N_SEEDS):
+        syn = synthesize(
+            SynthSpec(
+                kind="edge",
+                height_nm=height,
+                wall_um=0.05,
+                noise_nm=1.0,
+                tip_radius_um=2.0,
+                seed=3000 + seed,
+            )
+        )
+        res = analyze_step(syn.profile)
+        m = res.measurement
+        regions = res.tip_check.unreached_um if res.tip_check else []
+        foot.append(max((b - a for a, b in regions), default=0.0))
+        flank += any(n.code == "TIP_LIMITED_WALL" for n in res.notices)
+        if m.value_nm is not None and m.u_nm:
+            err.append(m.value_nm - height)
+            z.append(abs(m.value_nm - height) / m.u_nm)
+    f = np.array(foot)
+    return (
+        f"| {height:g} | {TIP.half_width_um(height):.2f} | {f.mean():.2f} ± {f.std(ddof=1):.2f} |"
+        f" {np.mean(err):+.3f} | {np.mean(np.array(z) < 2):.0%} | {flank}/{N_SEEDS} |"
+    )
+
+
+def trench_case(width: float, depth: float = 3000.0, seeds: int = 10) -> str:
+    """Narrow trench: does the program say the floor was not reached, and how deep did
+    the stylus record it?"""
+    expect = min(depth, float(TIP.drop_nm(width / 2)))
+    flagged, rec = 0, []
+    for seed in range(seeds):
+        syn = synthesize(
+            SynthSpec(
+                kind="groove",
+                height_nm=depth,
+                width_um=width,
+                wall_um=0.05,
+                noise_nm=0.5,
+                tip_radius_um=2.0,
+                length_um=300.0,
+                n_points=6000,
+                seed=4000 + seed,
+            )
+        )
+        res = analyze_step(syn.profile)
+        floor = [n for n in res.notices if n.code == "TIP_UNREACHED" and "floor" in n.message]
+        flagged += bool(floor)
+        if floor:
+            rec.append(floor[0].data["recorded_depth_nm"])
+    reach = "yes" if TIP.reaches_floor(width, depth) else "no"
+    got = f"{np.mean(rec):.0f}" if rec else "-"
+    return f"| {width:g} | {reach} | {expect:.0f} | {got} | {flagged}/{seeds} |"
+
+
+def _true_hidden(x: np.ndarray, s: np.ndarray) -> np.ndarray:
+    """Points of the true surface never the contact point of the stylus."""
+    dx = float(x[1] - x[0])
+    best = np.full(s.size, -np.inf)
+    arg = np.zeros(s.size, dtype=int)
+    m = int(np.ceil(TIP.half_width_um(float(np.ptp(s))) / dx)) + 1
+    for k in range(-m, m + 1):
+        g = np.full(s.size, -np.inf)
+        lo, hi = max(0, -k), min(s.size, s.size - k)
+        g[lo:hi] = s[lo + k : hi + k] - float(TIP.drop_nm(k * dx))
+        better = g > best
+        best, arg = np.where(better, g, best), np.where(better, k, arg)
+    hit = np.zeros(s.size, dtype=bool)
+    idx = np.arange(s.size) + arg
+    hit[idx[(idx >= 0) & (idx < s.size)]] = True
+    out = np.zeros(s.size, dtype=bool)
+    for a, b in runs(~hit):
+        if b - a >= 3:
+            out[a:b] = True
+    return out
+
+
+def rough_reach_case(corr: float, rms: float, seeds: int = 3) -> str:
+    x = np.linspace(0, 1500, 30_001)
+    dx = float(x[1] - x[0])
+    true_h, est_h, false_h = [], [], []
+    for seed in range(seeds):
+        rng = np.random.default_rng(5000 + seed)
+        w = gaussian_filter1d(rng.normal(size=x.size), corr / dx)
+        s = rms * w / np.std(w)
+        truth = _true_hidden(x, s)
+        est = check_tip(x, dilate(x, s, TIP) + rng.normal(0, 0.5, x.size), TIP).region_mask()
+        true_h.append(truth.mean())
+        est_h.append(est.mean())
+        false_h.append(np.mean(est & ~truth))
+    return (
+        f"| {rms:g} nm, {corr:g} µm | {100 * np.mean(true_h):.1f} % |"
+        f" {100 * np.mean(est_h):.1f} % | {100 * np.mean(false_h):.2f} % |"
+    )
+
+
+def a1_tail_case(width: float, wall: float) -> str:
+    """A1 groove with gently sloping walls: u with and without u_tail, and how often the
+    floor was found still bending."""
+    err, z_with, z_without, tails, bent = [], [], [], [], 0
+    for seed in range(N_SEEDS):
+        syn = synthesize(
+            SynthSpec(
+                kind="groove",
+                height_nm=100.0,
+                width_um=width,
+                wall_um=wall,
+                length_um=2000.0,
+                n_points=20_000,
+                noise_nm=1.0,
+                tip_radius_um=2.0,
+                seed=6000 + seed,
+            )
+        )
+        res = analyze_step(syn.profile)
+        m = res.measurement
+        bent += any(n.code == "A1_BOTTOM_NOT_FLAT" for n in res.notices)
+        if m.value_nm is None or not m.u_nm:
+            continue
+        e = m.value_nm - 100.0
+        tail = m.u_tail_nm or 0.0
+        err.append(e)
+        tails.append(tail)
+        z_with.append(abs(e) / m.u_nm)
+        z_without.append(abs(e) / math.sqrt(max(m.u_nm**2 - tail**2, 1e-30)))
+    return (
+        f"| W {width:g} µm, walls {wall:g} µm | {np.mean(err):+.3f} |"
+        f" {np.max(np.abs(err)):.3f} | {np.mean(tails):.3f} |"
+        f" {np.mean(np.array(z_without) < 2):.0%} | {np.mean(np.array(z_with) < 2):.0%} |"
+        f" {bent}/{N_SEEDS} |"
+    )
+
+
+def bow_groove_case(order: int) -> str:
+    err, warned = [], 0
+    for seed in range(N_SEEDS):
+        syn = synthesize(
+            SynthSpec(
+                kind="groove",
+                height_nm=100.0,
+                width_um=200.0,
+                noise_nm=0.5,
+                bow_nm=40.0,
+                tip_radius_um=2.0,
+                seed=1000 + seed,
+            )
+        )
+        res = analyze_step(syn.profile, StepSettings(bow_order=order))
+        warned += any(n.code == "A1_OUTER_CURVED" for n in res.notices)
+        if res.measurement.value_nm is not None:
+            err.append(res.measurement.value_nm - 100.0)
+    return f"| {order} | {np.mean(err):+.3f} | {warned}/{N_SEEDS} |"
 
 
 def main() -> None:
@@ -149,6 +312,46 @@ def main() -> None:
     for wall in (50.0, 100.0, 200.0, 400.0):
         print(wide_case(f"logistic, 10-90 % over {wall:g} µm", 100.0, wall_um=wall, **common))
     print(wide_case("straight ramp, 600 µm", 100.0, wall_um=600.0, wall_shape="ramp", **common))
+    print(
+        "\nA1 grooves 100 nm deep with gently sloping walls (logistic, 2 mm scan, noise 1 nm):"
+        " u with and without u_tail:\n"
+    )
+    print(
+        "| groove | mean error | max abs | mean u_tail | < 2u without u_tail | < 2u with |"
+        " A1_BOTTOM_NOT_FLAT |"
+    )
+    print("|---|---|---|---|---|---|---|")
+    for width, wall in ((400.0, 100.0), (400.0, 150.0), (600.0, 250.0)):
+        print(a1_tail_case(width, wall))
+    print("\nGroove (W 200 µm, 100 nm) in a scan with a 40 nm bow:\n")
+    print("| bow order | mean error | A1_OUTER_CURVED |")
+    print("|---|---|---|")
+    for order in (1, 2):
+        print(bow_groove_case(order))
+    print(
+        "\nStylus 2 µm radius, 60° cone. Vertical steps (noise 1 nm): hidden foot next to"
+        " the wall and the height:\n"
+    )
+    print(
+        "| height (nm) | hidden foot, theory (µm) | found (µm) | height mean error (nm) |"
+        " < 2u | TIP_LIMITED_WALL |"
+    )
+    print("|---|---|---|---|---|---|")
+    for h in (100.0, 1000.0, 5000.0):
+        print(tall_step_case(h))
+    print("\nTrenches 3000 nm deep (noise 0.5 nm, 10 seeds): floor reached and recorded depth:\n")
+    print("| width (µm) | floor reachable | recorded depth, theory (nm) | reported | flagged |")
+    print("|---|---|---|---|---|")
+    for w in (4.0, 5.0, 5.5, 7.0):
+        print(trench_case(w))
+    print(
+        "\nPoints the stylus did not touch on random rough surfaces (1.5 mm, noise 0.5 nm,"
+        " 3 seeds), against the true contact points:\n"
+    )
+    print("| roughness Rq, correlation | truly hidden | found hidden | found but touched |")
+    print("|---|---|---|---|")
+    for corr, rms in ((0.3, 100.0), (0.5, 60.0), (1.0, 50.0)):
+        print(rough_reach_case(corr, rms))
     print("\nAnalytical checks:\n")
     A, lam = 10.0, 20.0
     x = np.linspace(0, 6000, 60_000)

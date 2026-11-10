@@ -112,6 +112,33 @@ def test_wide_edge_options(window, tmp_path: Path) -> None:  # type: ignore[no-u
     w.chk_multiscale.setChecked(True)
 
 
+def test_stylus_options(window, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    from profilometry_analyzer.synthetic import SynthSpec, synthesize, write_csv
+
+    w = window
+    syn = synthesize(
+        SynthSpec(kind="edge", height_nm=5000, wall_um=0.05, noise_nm=1.0, tip_radius_um=2.0)
+    )
+    f = write_csv(syn.profile, tmp_path / "tall_1.csv", metadata={"Stylus Radius": "2 um"})
+    (key,) = w.add_files([f])
+    st = w.step_settings()
+    assert st.cone_angle_deg is None and st.tip_check and w.chk_tip_check.isChecked()
+    w.analyze_current()
+    res = w.scans[key].step
+    assert res.tip_check is not None and res.tip_check.unreached_um
+    assert res.cone_angle_source == "instrument default"
+    w.sp_cone.setValue(45)
+    w.chk_tip_check.setChecked(False)
+    assert w.step_settings().cone_angle_deg == 45
+    w.analyze_current()
+    res = w.scans[key].step
+    assert res.tip_check is None and res.cone_angle_deg == 45
+    w.roughness_current()
+    assert w.scans[key].roughness.result.stylus["cone_angle_deg"] == 45
+    w.sp_cone.setValue(0)
+    w.chk_tip_check.setChecked(True)
+
+
 def test_batch_roughness_stress(window, demo: Path) -> None:  # type: ignore[no-untyped-def]
     w = window
     w.add_files(sorted(demo.glob("film*.csv")))

@@ -1,9 +1,10 @@
 """Synthetic stylus profiles with known step height, tilt, bow, noise, burrs and spikes.
 
 Used by the tests, the ``synth`` command and the validation in the README.  The surface
-is built first (edges with a finite wall width), then traced with a spherical stylus
-(morphological dilation: the tip apex follows the highest contact), then tilt, bow,
-noise and spikes are added - the order in which they arise on the instrument.
+is built first (edges with a finite wall width), then traced with a stylus - a sphere
+on a cone (morphological dilation: the apex follows the highest contact,
+:mod:`.core.tip`) - then tilt, bow, noise and spikes are added, the order in which they
+arise on the instrument.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import Any
 
 import numpy as np
 
+from .core.tip import Tip, dilate
 from .profile import Profile, ScanInfo
 
 
@@ -48,7 +50,10 @@ class SynthSpec:
     spikes: int = 0
     spike_nm: float = 500.0
     tip_radius_um: float = 0.0
-    """Spherical stylus radius for the tracing (0: ideal point)."""
+    """Stylus radius for the tracing (0: ideal point)."""
+    cone_angle_deg: float = 60.0
+    """Full angle of the stylus cone (0: a sphere without a cone).  Only features deeper
+    than ``r (1 - sin(angle / 2))`` - 1 µm for 2 µm and 60° - see the cone."""
     sine_amplitude_nm: float = 10.0
     sine_wavelength_um: float = 50.0
     seed: int = 0
@@ -76,24 +81,14 @@ def _smooth_step(x: np.ndarray, x0: float, wall: float, shape: str = "logistic")
     return 0.5 * (1.0 + np.tanh((x - x0) / (2.0 * s)))
 
 
-def trace(x: np.ndarray, z_nm: np.ndarray, radius_um: float) -> np.ndarray:
-    """Profile seen by a spherical stylus of ``radius_um`` (apex height, nm)."""
-    if radius_um <= 0:
+def trace(
+    x: np.ndarray, z_nm: np.ndarray, radius_um: float, cone_angle_deg: float = 0.0
+) -> np.ndarray:
+    """Profile recorded by a stylus of ``radius_um`` on a cone of ``cone_angle_deg``
+    (apex height, nm; ``radius_um = 0`` and no cone: an ideal point)."""
+    if radius_um <= 0 and cone_angle_deg <= 0:
         return z_nm.copy()
-    dx = float(np.median(np.diff(x)))
-    m = int(np.ceil(radius_um / dx))
-    out = np.full_like(z_nm, -np.inf)
-    n = z_nm.size
-    for k in range(-m, m + 1):
-        u = k * dx
-        if abs(u) > radius_um:
-            continue
-        drop_nm = (radius_um - np.sqrt(radius_um**2 - u**2)) * 1e3
-        lo, hi = max(0, -k), min(n, n - k)
-        cand = np.full(n, -np.inf)
-        cand[lo:hi] = z_nm[lo + k : hi + k] - drop_nm
-        np.maximum(out, cand, out=out)
-    return out
+    return dilate(x, z_nm, Tip(radius_um, cone_angle_deg))
 
 
 def surface(spec: SynthSpec) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
@@ -173,7 +168,7 @@ def synthesize(spec: SynthSpec | None = None, **kw: Any) -> Synthetic:
         w = rng.normal(size=x.size)
         w = gaussian_filter1d(w, max(spec.roughness_corr_um / dx, 0.5))
         z = z + spec.roughness_nm * w / np.std(w)
-    z = trace(x, z, spec.tip_radius_um)
+    z = trace(x, z, spec.tip_radius_um, spec.cone_angle_deg if spec.tip_radius_um > 0 else 0.0)
     t = (x - spec.length_um / 2) / (spec.length_um / 2)
     z = z + spec.tilt_nm_per_um * (x - spec.length_um / 2) + spec.bow_nm * t**2
     if spec.noise_nm:

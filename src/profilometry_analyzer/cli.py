@@ -75,6 +75,11 @@ def _reader_options(a: argparse.Namespace) -> dict[str, Any]:
 def _add_scan(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("scan")
     g.add_argument("--tip-radius", type=float, help="stylus radius in µm (default: file, else 2)")
+    g.add_argument(
+        "--cone-angle",
+        type=float,
+        help="full angle of the stylus cone in degrees (default: file, else 60; 0 = sphere only)",
+    )
     g.add_argument("--force", type=float, help="stylus force in mg (if not in the file)")
     g.add_argument("--soft", action="store_true", help="the film is soft (polymer): force check")
 
@@ -117,6 +122,11 @@ def _add_step(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="keep the detected transitions even when the plateau next to them is not flat",
     )
+    g.add_argument(
+        "--no-tip-check",
+        action="store_true",
+        help="do not look for the points the stylus could not touch",
+    )
     g.add_argument("--no-despike", action="store_true")
     g.add_argument("--spike-k", type=float, default=8.0)
 
@@ -146,8 +156,10 @@ def _step_settings(a: argparse.Namespace) -> StepSettings:
         multiscale=not a.single_scale,
         widen=not a.no_widen,
         tip_radius_um=a.tip_radius,
+        cone_angle_deg=a.cone_angle,
         stylus_force_mg=a.force,
         soft_film=a.soft,
+        tip_check=not a.no_tip_check,
     )
 
 
@@ -333,7 +345,8 @@ def _report_step(res: Any) -> None:
             )
     print(
         f"  levelling {res.level.method}, slope {res.level.slope_nm_per_um:.4g} nm/µm,"
-        f" stylus radius {res.tip_radius_um:g} µm ({res.tip_radius_source})"
+        f" stylus radius {res.tip_radius_um:g} µm ({res.tip_radius_source}),"
+        f" cone {res.cone_angle_deg:g}° ({res.cone_angle_source})"
     )
     _print_notices(res.notices)
 
@@ -407,8 +420,8 @@ def cmd_step(a: argparse.Namespace) -> int:
 
 def cmd_roughness(a: argparse.Namespace) -> int:
     prof = read_profile(a.file, **_reader_options(a))
-    if a.tip_radius:
-        prof = prof.with_scan(tip_radius_um=a.tip_radius)
+    if a.tip_radius or a.cone_angle is not None:
+        prof = prof.with_scan(tip_radius_um=a.tip_radius or None, cone_angle_deg=a.cone_angle)
     st = RoughnessSettings(
         lambda_c_um=a.lc,
         lambda_s_um=a.ls,
@@ -431,6 +444,11 @@ def cmd_roughness(a: argparse.Namespace) -> int:
         for k in ("Ra", "Rq", "Rz", "Rp", "Rv", "Rt"):
             print(f"  {k:<4}= {pr[k]:.5g} nm")
         print(f"  Rsk = {pr['Rsk']:.4g}\n  Rku = {pr['Rku']:.4g}\n  Rsm = {pr['Rsm']:.5g} µm")
+        if r.stylus:
+            print(
+                f"  stylus {r.stylus['radius_um']:g} µm, {r.stylus['cone_angle_deg']:g}° cone:"
+                f" {r.stylus['unreached_percent']:.2g} % of the evaluation length not touched"
+            )
         _print_notices(res.notices)
     if a.output:
         from .export import plots
@@ -709,6 +727,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--range", type=_pair, help="evaluate only x range a:b (µm), e.g. one plateau")
     p.add_argument("--crop", type=_pair, help="crop the profile before filtering")
     p.add_argument("--tip-radius", type=float)
+    p.add_argument("--cone-angle", type=float, help="stylus cone angle in degrees (default 60)")
     p.add_argument("--no-despike", action="store_true")
     _add_output(p)
     p.set_defaults(func=cmd_roughness)

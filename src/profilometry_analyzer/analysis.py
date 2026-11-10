@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+import numpy as np
+
 from . import notices as N
 from .core.despike import despike
 from .core.edges import EdgeSet, classify, detect_edges, edges_at
@@ -24,6 +26,7 @@ from .core.steps import (
     widen_transitions,
 )
 from .core.stress import StressResult, StressSettings, stress
+from .core.tip import Tip, TipCheck, check_tip
 from .instrument import DEFAULT_INSTRUMENT, InstrumentSpec
 from .notices import Notice
 from .profile import Profile
@@ -67,8 +70,12 @@ class StepSettings:
     widen: bool = True
     """Widen a transition while the plateau next to it still runs towards the other level."""
     tip_radius_um: float | None = None
+    cone_angle_deg: float | None = None
+    """Full angle of the stylus cone (default: file, else the instrument's 60°)."""
     stylus_force_mg: float | None = None
     soft_film: bool = False
+    tip_check: bool = True
+    """Find the points the stylus could not touch (:mod:`.core.tip`)."""
     seed: int = 0
 
     def __post_init__(self) -> None:
@@ -115,6 +122,7 @@ def prepare(profile: Profile, st: StepSettings | None = None, **scan: Any) -> Pr
         p = p.crop(*st.crop_um)
     overrides = {
         "tip_radius_um": st.tip_radius_um,
+        "cone_angle_deg": st.cone_angle_deg,
         "stylus_force_mg": st.stylus_force_mg,
         "soft_film": True if st.soft_film else None,
         **scan,
@@ -132,6 +140,13 @@ def tip_radius(profile: Profile, inst: InstrumentSpec = DEFAULT_INSTRUMENT) -> t
     return inst.tip_radius_um, "instrument default"
 
 
+def cone_angle(profile: Profile, inst: InstrumentSpec = DEFAULT_INSTRUMENT) -> tuple[float, str]:
+    if profile.scan.cone_angle_deg is not None:
+        src = profile.scan.sources.get("cone_angle_deg", "file")
+        return float(profile.scan.cone_angle_deg), src
+    return inst.cone_angle_deg, "instrument default"
+
+
 @dataclass
 class StepResult:
     profile: Profile
@@ -146,6 +161,10 @@ class StepResult:
     tip_radius_um: float
     tip_radius_source: str
     notices: list[Notice] = field(default_factory=list)
+    cone_angle_deg: float = DEFAULT_INSTRUMENT.cone_angle_deg
+    cone_angle_source: str = "instrument default"
+    tip_check: TipCheck | None = None
+    """Points the stylus could not touch and the reconstruction (``None``: not run)."""
 
     @property
     def thickness_nm(self) -> float | None:
@@ -195,6 +214,10 @@ class StepResult:
             "level_method": self.level.method,
             "bow_order": self.settings.bow_order,
             "tip_radius_um": self.tip_radius_um,
+            "cone_angle_deg": self.cone_angle_deg,
+            "unreached_percent": (
+                100.0 * self.tip_check.unreached_fraction() if self.tip_check else None
+            ),
             "stylus_force_mg": self.profile.scan.stylus_force_mg,
             "z_unit": self.source.z_unit,
             "z_unit_source": self.source.z_unit_source,
@@ -213,6 +236,9 @@ class StepResult:
             "edges": self.edges.to_dict(x),
             "tip_radius_um": self.tip_radius_um,
             "tip_radius_source": self.tip_radius_source,
+            "cone_angle_deg": self.cone_angle_deg,
+            "cone_angle_source": self.cone_angle_source,
+            "tip_check": self.tip_check.to_dict() if self.tip_check else None,
             "profile": self.source.summary(),
             "history": list(self.profile.history),
             "key_numbers": self.key_numbers(),
@@ -269,6 +295,8 @@ def analyze_step(
     st = settings or StepSettings()
     p = prepare(profile, st)
     tip, tip_src = tip_radius(p, instrument)
+    cone, cone_src = cone_angle(p, instrument)
+    stylus = Tip(tip, cone)
     opts = _edge_options(st, tip)
     x = p.x_um
     if st.level == "auto":
@@ -312,11 +340,28 @@ def analyze_step(
         kind = detected if st.mode == "auto" else st.mode
         if kind == "periodic" and len(eset.edges) < 2:
             kind = detected
-        meas = measure(x, lp.z_nm, eset, kind, k=st.burr_k, tip_radius_um=tip)
+        meas = measure(x, lp.z_nm, eset, kind, k=st.burr_k, tip_radius_um=tip, cone_angle_deg=cone)
     noise = float(eset.threshold.get("height_noise_nm", 0.0))
     meas.notices += range_notices(meas, noise, instrument)
     notes = list(lp.notices) + list(eset.notices) + widen_notes + list(meas.notices)
     notes += soft_film_notices(lp, instrument)
+    reach = check_tip(x, lp.z_nm, stylus, lp.valid) if st.tip_check else None
+    if reach is not None:
+        notes += tip_notices(reach, meas)
+    notes += wall_notices(x, lp.z_nm, eset, stylus)
+    depth = float(np.ptp(lp.z_nm[lp.valid])) if lp.valid.any() else 0.0
+    if cone_src == "instrument default" and stylus.has_cone and depth > stylus.tangent_depth_nm:
+        notes.append(
+            Notice(
+                N.CONE_ANGLE_DEFAULT,
+                N.INFO,
+                f"the profile spans {depth:.4g} nm, more than the {stylus.tangent_depth_nm:.4g} nm"
+                f" a {tip:g} µm sphere covers, so the stylus cone shapes the walls; its angle"
+                f" is not in the file and {cone:g}° was assumed (set the angle of the mounted"
+                " stylus)",
+                {"cone_angle_deg": cone},
+            )
+        )
     if tip_src == "instrument default":
         notes.append(
             Notice(
@@ -337,7 +382,111 @@ def analyze_step(
         tip_radius_um=tip,
         tip_radius_source=tip_src,
         notices=N.unique(notes),
+        cone_angle_deg=cone,
+        cone_angle_source=cone_src,
+        tip_check=reach,
     )
+
+
+def tip_notices(reach: TipCheck, meas: StepMeasurement) -> list[Notice]:
+    """Where the stylus did not touch the surface, and whether the fitted levels use
+    such points."""
+    if not reach.unreached_um:
+        return []
+    length = sum(b - a for a, b in reach.unreached_um)
+    longest = max(reach.unreached_um, key=lambda r: r[1] - r[0])
+    worst_plane, worst_share = None, 0.0
+    for plane in meas.planes:
+        used = plane.used
+        if used is None or not used.any():
+            continue
+        share = reach.unreached_fraction(used)
+        if share > worst_share:
+            worst_plane, worst_share = plane, share
+    where = (
+        f"{len(reach.unreached_um)} region(s), {length:.3g} µm in all, the longest"
+        f" {longest[1] - longest[0]:.3g} µm at {0.5 * (longest[0] + longest[1]):.4g} µm"
+    )
+    data = {"unreached_um": [list(r) for r in reach.unreached_um], "stylus": reach.tip.to_dict()}
+    out: list[Notice] = []
+    floors = [i for i, f in enumerate(reach.floors) if f]
+    if floors:
+        j = max(floors, key=lambda i: reach.depth_nm[i])
+        a, b = reach.unreached_um[j]
+        out.append(
+            Notice(
+                N.TIP_UNREACHED,
+                N.INFO,
+                f"the stylus ({reach.tip.describe()}) did not reach the floor of"
+                f" {len(floors)} dip(s) narrower than itself; the deepest, {b - a:.3g} µm at"
+                f" {0.5 * (a + b):.4g} µm, reads {reach.depth_nm[j]:.4g} nm deep, which is only a"
+                " lower bound of its true depth (and its width is the stylus's)",
+                {**data, "floors": floors, "recorded_depth_nm": reach.depth_nm[j]},
+            )
+        )
+    if worst_plane is not None and worst_share > 0.02:
+        return [
+            Notice(
+                N.TIP_UNREACHED,
+                N.WARNING,
+                f"the stylus ({reach.tip.describe()}) did not touch the surface in {where};"
+                f" {100 * worst_share:.2g} % of the points of the {worst_plane.name} plane are"
+                " among them: that level is only an upper bound (a floor the stylus cannot"
+                " reach reads too high) - narrow the region or use a finer stylus",
+                {**data, "plane": worst_plane.name, "plane_percent": 100 * worst_share},
+            )
+        ]
+    if len(floors) < len(reach.unreached_um):
+        out.append(
+            Notice(
+                N.TIP_UNREACHED,
+                N.INFO,
+                f"the stylus ({reach.tip.describe()}) did not touch the surface in {where} (the"
+                " foot of a steep wall, or a gap narrower than the stylus); the fitted levels"
+                " do not use these points",
+                data,
+            )
+        )
+    return out
+
+
+def wall_notices(x: np.ndarray, z: np.ndarray, eset: EdgeSet, tip: Tip) -> list[Notice]:
+    """Walls as steep as the stylus flank: their recorded shape is the stylus's."""
+    if not tip.has_cone or not eset.edges or x.size < 5:
+        return []
+    out: list[Notice] = []
+    slope = np.abs(np.gradient(z, x))
+    for i, e in enumerate(eset.edges):
+        seg = slope[e.start : e.stop]
+        if seg.size < 3:
+            continue
+        steep = float(np.percentile(seg, 90))
+        if steep > 1.15 * tip.flank_slope:
+            out.append(
+                Notice(
+                    N.TIP_LIMITED_WALL,
+                    N.WARNING,
+                    f"the wall at {e.x_um:.4g} µm is steeper ({steep / 1e3:.3g} µm/µm) than the"
+                    f" flank of a {tip.cone_angle_deg:g}° stylus cone can record"
+                    f" ({tip.flank_slope / 1e3:.3g}): the mounted stylus is sharper than"
+                    " assumed - check the cone angle; the regions it could not touch are"
+                    " wrong until then (the height is not affected)",
+                    {"edge": i + 1, "slope": steep / 1e3, "flank_slope": tip.flank_slope / 1e3},
+                )
+            )
+        elif steep >= 0.9 * tip.flank_slope:
+            out.append(
+                Notice(
+                    N.TIP_LIMITED_WALL,
+                    N.INFO,
+                    f"the wall at {e.x_um:.4g} µm is as steep as the flank of the"
+                    f" {tip.cone_angle_deg:g}° stylus cone ({steep / 1e3:.3g} vs"
+                    f" {tip.flank_slope / 1e3:.3g} µm/µm): its recorded shape and width are the"
+                    " stylus's, not the film edge's; the height is not affected",
+                    {"edge": i + 1, "slope": steep / 1e3, "flank_slope": tip.flank_slope / 1e3},
+                )
+            )
+    return out
 
 
 # ---------------------------------------------------------------- roughness

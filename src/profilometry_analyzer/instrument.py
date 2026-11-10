@@ -36,6 +36,11 @@ class InstrumentSpec:
     1.25 µm and its 2022 leaflet 2 µm; the larger value is the default because it widens
     the excluded edge zones and raises more narrow-feature warnings, i.e. errs on the
     safe side.  Pass the radius of the stylus actually mounted."""
+    cone_angle_deg: float = 60.0
+    """Full angle of the stylus cone used when the file does not give one.  60° is the
+    usual nominal angle of roughness styli (90° the other common one), and a DektakXT
+    facility lists 60° for its 2 µm stylus; it only matters for features deeper than
+    ``r (1 - sin 30°)`` = r / 2.  Pass the angle of the stylus actually mounted."""
     soft_film_max_force_mg: float = 3.0
     """Highest stylus force that does not trigger a warning on a film marked soft
     (polymers: start at 1-3 mg)."""

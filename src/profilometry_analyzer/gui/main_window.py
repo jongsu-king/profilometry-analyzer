@@ -308,11 +308,24 @@ class MainWindow(QMainWindow):
         g = QGroupBox("STYLUS AND FILM")
         f = QFormLayout(g)
         self.sp_tip = _spin(0, 50, 0, 0.25, 2, "from file")
+        self.sp_cone = _spin(0, 170, 0, 5, 0, "from file")
+        self.sp_cone.setToolTip(
+            "full angle of the stylus cone; 'from file' uses the file, else 60°. It matters"
+            " only for features deeper than half the stylus radius"
+        )
         self.sp_force = _spin(0, 50, 0, 0.5, 1, "from file")
         self.chk_soft = QCheckBox("soft film (polymer)")
+        self.chk_tip_check = QCheckBox("mark points the stylus could not touch")
+        self.chk_tip_check.setChecked(True)
+        self.chk_tip_check.setToolTip(
+            "the foot of steep walls and gaps narrower than the stylus: there the surface"
+            " lies somewhere below the record"
+        )
         f.addRow("stylus radius (µm)", self.sp_tip)
+        f.addRow("stylus cone angle (°)", self.sp_cone)
         f.addRow("stylus force (mg)", self.sp_force)
         f.addRow("", self.chk_soft)
+        f.addRow("", self.chk_tip_check)
         lay.addWidget(g)
         lay.addStretch(1)
         return w
@@ -594,8 +607,10 @@ class MainWindow(QMainWindow):
             multiscale=self.chk_multiscale.isChecked(),
             widen=self.chk_widen.isChecked(),
             tip_radius_um=self.sp_tip.value() or None,
+            cone_angle_deg=self.sp_cone.value() or None,
             stylus_force_mg=self.sp_force.value() or None,
             soft_film=self.chk_soft.isChecked(),
+            tip_check=self.chk_tip_check.isChecked(),
         )
 
     def roughness_settings(self) -> RoughnessSettings:
@@ -687,7 +702,11 @@ class MainWindow(QMainWindow):
             return
         sc = self.scans[self.current]
         st = self.roughness_settings()
-        prof = sc.profile
+        stylus = {
+            "tip_radius_um": self.sp_tip.value() or None,
+            "cone_angle_deg": self.sp_cone.value() or None,
+        }
+        prof = sc.profile.with_scan(**stylus) if any(stylus.values()) else sc.profile
 
         def job() -> RoughnessAnalysis:
             return analyze_roughness(prof, st)
@@ -800,6 +819,18 @@ class MainWindow(QMainWindow):
         rows += [
             ("levelling", f"{res.level.method}, slope {res.level.slope_nm_per_um:.4g} nm/µm"),
             ("stylus radius", f"{res.tip_radius_um:g} µm ({res.tip_radius_source})"),
+            ("stylus cone", f"{res.cone_angle_deg:g}° ({res.cone_angle_source})"),
+        ]
+        if res.tip_check is not None:
+            hidden = res.tip_check.unreached_um
+            rows.append(
+                (
+                    "not touched",
+                    f"{100 * res.tip_check.unreached_fraction():.2g} % of the scan"
+                    f" ({len(hidden)} region{'s' if len(hidden) != 1 else ''})",
+                )
+            )
+        rows += [
             (
                 "units",
                 f"x {res.source.x_unit} ({res.source.x_unit_source}),"

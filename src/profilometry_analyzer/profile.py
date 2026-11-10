@@ -29,6 +29,8 @@ class ScanInfo:
     scan_length_um: float | None = None
     scan_speed_um_s: float | None = None
     tip_radius_um: float | None = None
+    cone_angle_deg: float | None = None
+    """Full angle of the stylus cone (degrees)."""
     n_points: int | None = None
     duration_s: float | None = None
     date: str | None = None
@@ -41,6 +43,7 @@ class ScanInfo:
             "scan_length_um": self.scan_length_um,
             "scan_speed_um_s": self.scan_speed_um_s,
             "tip_radius_um": self.tip_radius_um,
+            "cone_angle_deg": self.cone_angle_deg,
             "n_points": self.n_points,
             "duration_s": self.duration_s,
             "date": self.date,
@@ -56,6 +59,7 @@ class ScanInfo:
             scan_length_um=d.get("scan_length_um"),
             scan_speed_um_s=d.get("scan_speed_um_s"),
             tip_radius_um=d.get("tip_radius_um"),
+            cone_angle_deg=d.get("cone_angle_deg"),
             n_points=d.get("n_points"),
             duration_s=d.get("duration_s"),
             date=d.get("date"),

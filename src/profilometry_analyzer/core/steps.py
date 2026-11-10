@@ -51,6 +51,7 @@ from ..instrument import DEFAULT_INSTRUMENT, InstrumentSpec
 from ..notices import Notice
 from .edges import Edge, EdgeSet, build_segments
 from .stats import LineFit, correlation_time, fit_line, mad_sigma, runs
+from .tip import Tip
 
 
 @dataclass
@@ -351,6 +352,7 @@ def widen_transitions(
                     {max(f * block_fraction * length0, 10.0 * dx) for f in (0.2, 0.5, 1.0)}
                 )
                 toward = e.sign if side == 0 else -e.sign
+                middle = 0 < i + side < len(eset.segments) - 1
                 while True:
                     mask = plateau(i, side)
                     xs = x[mask]
@@ -362,7 +364,7 @@ def widen_transitions(
                         (
                             b
                             for b in blocks
-                            if _tail_left(x, z, mask, side, b, toward, k, k_tail, tau_pool)
+                            if _tail_left(x, z, mask, side, b, toward, k, k_tail, tau_pool, middle)
                         ),
                         0.0,
                     )
@@ -462,12 +464,20 @@ def _tail_stat(
     toward: int,
     k: float,
     tau_pool: float,
+    both_ends: bool = False,
 ) -> tuple[float, float]:
     """Mean offset (towards the other level) of the block of ``mask`` next to the edge
-    from the line through the rest of the plateau, and its standard error."""
+    from the line through the rest of the plateau, and its standard error.
+
+    With ``both_ends`` (a plateau between two edges, such as the floor of a groove) a
+    block of the same length at the far end is left out of the reference line as well:
+    the tail of the other edge would bend the line towards this block and hide it."""
     xs = x[mask]
     inner = mask & (x > xs[-1] - block) if side == 0 else mask & (x < xs[0] + block)
     outer = mask & ~inner
+    if both_ends:
+        far = mask & (x < xs[0] + block) if side == 0 else mask & (x > xs[-1] - block)
+        outer &= ~far
     if inner.sum() < 5 or outer.sum() < 10:
         return 0.0, float("inf")
     ref = fit_plane(x, z, outer, name="", k=k)
@@ -496,10 +506,11 @@ def _tail_left(
     k: float,
     k_tail: float,
     tau_pool: float,
+    both_ends: bool = False,
 ) -> bool:
     """Whether the block next to the edge lies more than ``k_tail`` standard errors
     towards the other level."""
-    dev, se = _tail_stat(x, z, mask, side, block, toward, k, tau_pool)
+    dev, se = _tail_stat(x, z, mask, side, block, toward, k, tau_pool, both_ends)
     return bool(np.isfinite(se) and dev > k_tail * se)
 
 
@@ -541,7 +552,10 @@ def measure_edges(
                 if e.widened_um[side] > 0 and plane.mask is not None:
                     xs = x[plane.mask]
                     block = max(0.1 * float(xs[-1] - xs[0]), 10.0 * float(np.median(np.diff(x))))
-                    dev, _ = _tail_stat(x, z, plane.mask, side, block, toward, k, plane.line.tau)
+                    middle = 0 < i + side < len(planes) - 1
+                    dev, _ = _tail_stat(
+                        x, z, plane.mask, side, block, toward, k, plane.line.tau, middle
+                    )
                     u_tail += max(dev, 0.0)
             row.update(_difference(a, b, e.x_um, gap, u_tail))
             row["direction"] = "up" if row["height_nm"] > 0 else "down"
@@ -707,17 +721,20 @@ def _a1_masks(
     return (left | right) & usable, inner & usable, info
 
 
-def stylus_reaches_bottom(width_um: float, depth_um: float, tip_radius_um: float) -> bool:
-    """Whether a spherical tip of radius ``r`` touches the floor of a rectangular groove.
+def stylus_reaches_bottom(
+    width_um: float, depth_um: float, tip_radius_um: float, cone_angle_deg: float = 0.0
+) -> bool:
+    """Whether a stylus of radius ``r`` (on a cone of ``cone_angle_deg``; 0: a sphere
+    alone) touches the floor of a rectangular groove.
 
-    Below the floor the sphere centre sits ``r`` above it; it clears the two top corners
-    when ``(W/2)^2 >= 2 r d - d^2`` for ``d < r`` and when ``W >= 2 r`` otherwise.  (A
-    real stylus is a cone with a rounded tip, so steep walls are traced worse still.)
+    The apex reaches the floor when the groove is at least as wide as the stylus at the
+    groove depth: ``(W/2)^2 >= 2 r d - d^2`` while the sphere alone enters (``d`` below
+    ``r (1 - sin a)``, ``a`` the half angle), and ``W/2 >= r cos a + (d - r (1 - sin a))
+    tan a`` once the cone does (:meth:`.tip.Tip.half_width_um`).  A 2 µm, 60° stylus needs
+    8.1 µm to reach the floor of a 5 µm deep trench; the sphere alone would need 4 µm.
     """
-    r, d, half = tip_radius_um, abs(depth_um), width_um / 2.0
-    if d >= r:
-        return width_um >= 2 * r
-    return half * half >= 2 * r * d - d * d
+    tip = Tip(tip_radius_um, cone_angle_deg)
+    return tip.reaches_floor(width_um, abs(depth_um) * 1e3)
 
 
 def measure_a1(
@@ -729,6 +746,7 @@ def measure_a1(
     kind: str,
     k: float = 4.0,
     tip_radius_um: float = 2.0,
+    cone_angle_deg: float = DEFAULT_INSTRUMENT.cone_angle_deg,
 ) -> StepMeasurement:
     """Groove depth or ridge height in the ISO 5436-1 type A1 manner."""
     i1, i2 = pair
@@ -774,6 +792,8 @@ def measure_a1(
                 f" ({'outer' if outer is None else 'inner'} region has fewer than 3 points)",
             )
         )
+        recorded = max(abs(e1.height_nm), abs(e2.height_nm))
+        notes += _narrow_notices(kind, w, recorded, Tip(tip_radius_um, cone_angle_deg))
         return StepMeasurement(
             kind,
             "iso5436-a1",
@@ -786,8 +806,48 @@ def measure_a1(
             notices=notes,
         )
     gap = w / 3.0  # the inner line is evaluated at its centre; it spans W/3
-    diff = _difference(outer, inner, c, gap)
+    # a floor that still bends up towards both rims: the walls' tails reach the central
+    # third, which ISO 5436-1 A1 takes to be flat
+    toward = 1.0 if kind == "groove" else -1.0
+    bend, bend_se = _bend(x, z, inner, toward)
+    depth_scale = abs(outer.line.at(c) - inner.line.at(c))
+    bent = bend > max(4.0 * bend_se, 0.005 * depth_scale)
+    if bent:
+        # confirmed over the whole floor between the walls, where tails grow towards the
+        # rims and correlated roughness does not
+        floor = fit_plane(x, z, eset.usable(eset.segments[i1 + 1]), name="floor", k=k)
+        f_bend, f_se = _bend(x, z, floor, toward) if floor is not None else (0.0, np.inf)
+        bent = f_bend > 4.0 * f_se
+    u_tail = _a1_tail(x, z, e1, e2, outer, inner, k) + (bend if bent else 0.0)
+    diff = _difference(outer, inner, c, gap, u_tail)
     value = -diff["height_nm"] if kind == "groove" else diff["height_nm"]
+    if bent:
+        where = "floor" if kind == "groove" else "top"
+        notes.append(
+            Notice(
+                N.A1_BOTTOM_NOT_FLAT,
+                N.WARNING,
+                f"the {where} still bends towards the {'rims' if kind == 'groove' else 'base'}"
+                f" by {bend:.3g} nm over the central third (± {bend_se:.2g} nm): the tails of"
+                f" gently sloping walls reach the region that ISO 5436-1 A1 takes to be flat,"
+                f" so the {'depth' if kind == 'groove' else 'height'} is probably too small;"
+                " the bend is added to u_tail",
+                {"bend_nm": bend, "bend_se_nm": bend_se},
+            )
+        )
+    o_bend, o_se = _bend(x, z, outer, 1.0)
+    if abs(o_bend) > max(4.0 * o_se, 0.01 * depth_scale) and not bent:
+        notes.append(
+            Notice(
+                N.A1_OUTER_CURVED,
+                N.WARNING,
+                f"the outer level is curved: its ends lie {o_bend:+.3g} nm (± {o_se:.2g}) from"
+                " a straight line through its middle. A bow left in the profile moves the"
+                f" {'depth' if kind == 'groove' else 'height'} by about as much - level with"
+                " a bow order of 2 or more (--bow 2), or check that the scan is flat",
+                {"bend_nm": o_bend, "bend_se_nm": o_se},
+            )
+        )
     # flatness of the floor (groove) or top (ridge) compared with the outer level
     if inner.line.sigma > 3 * max(outer.line.sigma, 1e-12) and inner.n_used >= 5:
         notes.append(
@@ -822,7 +882,7 @@ def measure_a1(
                     {"height_nm": float(r.max()), "x_um": float(x[rim][j]), "zone": "rim"},
                 )
             )
-    notes += _narrow_notices(kind, w, abs(value), tip_radius_um, inner)
+    notes += _narrow_notices(kind, w, abs(value), Tip(tip_radius_um, cone_angle_deg))
     return StepMeasurement(
         kind=kind,
         method="iso5436-a1",
@@ -830,6 +890,7 @@ def measure_a1(
         u_nm=diff["u_nm"],
         u_fit_nm=diff["u_fit_nm"],
         u_slope_nm=diff["u_slope_nm"],
+        u_tail_nm=diff["u_tail_nm"],
         position_um=c,
         width_um=w,
         planes=[outer, inner],
@@ -840,19 +901,69 @@ def measure_a1(
     )
 
 
-def _narrow_notices(
-    kind: str, width_um: float, height_nm: float, tip_radius_um: float, inner: PlaneFit
-) -> list[Notice]:
+def _bend(x: np.ndarray, z: np.ndarray, plane: PlaneFit, toward: float) -> tuple[float, float]:
+    """How far the ends of a level rise towards the other level above its centre (a
+    quadratic over the points used), and the standard error of that, with the
+    correlation of the quadratic's residuals allowed for."""
+    if plane.used is None or int(plane.used.sum()) < 20:
+        return 0.0, float("inf")
+    xs, zs = x[plane.used], z[plane.used]
+    half = 0.5 * float(xs[-1] - xs[0])
+    if half <= 0:
+        return 0.0, float("inf")
+    t = (xs - 0.5 * float(xs[0] + xs[-1])) / half
+    a = np.column_stack([np.ones_like(t), t, t * t])
+    coef, *_ = np.linalg.lstsq(a, zs, rcond=None)
+    r = zs - a @ coef
+    dof = max(t.size - 3, 1)
+    # the correlation of the quadratic's residuals: the line's would count the bend itself
+    tau = max(float(correlation_time([r], n_params=3)["tau"]), 1.0)
+    cov = float(r @ r) / dof * np.linalg.inv(a.T @ a) * tau
+    return float(toward * coef[2]), float(np.sqrt(cov[2, 2]))
+
+
+def _a1_tail(
+    x: np.ndarray, z: np.ndarray, e1: Edge, e2: Edge, outer: PlaneFit, inner: PlaneFit, k: float
+) -> float:
+    """``u_tail`` of an A1 depth: the offset towards the other level that the block next
+    to each widened transition still shows, halved because one line spans both sides of
+    a level, summed over the four sides."""
+    if outer.mask is None or inner.mask is None:
+        return 0.0
+    dx = float(np.median(np.diff(x))) if x.size > 1 else 1.0
+    parts = (
+        (e1, 0, outer.mask & (x < e1.x_um), outer),
+        (e1, 1, inner.mask, inner),
+        (e2, 0, inner.mask, inner),
+        (e2, 1, outer.mask & (x > e2.x_um), outer),
+    )
+    total = 0.0
+    for e, side, mask, plane in parts:
+        if e.widened_um[side] <= 0 or int(mask.sum()) < 20:
+            continue
+        xs = x[mask]
+        block = max(0.1 * float(xs[-1] - xs[0]), 10.0 * dx)
+        toward = e.sign if side == 0 else -e.sign
+        dev, _ = _tail_stat(x, z, mask, side, block, toward, k, plane.line.tau, plane is inner)
+        total += 0.5 * max(dev, 0.0)
+    return total
+
+
+def _narrow_notices(kind: str, width_um: float, height_nm: float, tip: Tip) -> list[Notice]:
+    """Narrow-feature warnings; ``height_nm`` is the recorded depth, which is at most the
+    true one, so a stylus that cannot reach it cannot reach the true floor either."""
     out: list[Notice] = []
-    r = tip_radius_um
-    if kind == "groove" and not stylus_reaches_bottom(width_um, height_nm / 1e3, r):
+    r = tip.radius_um
+    if kind == "groove" and not tip.reaches_floor(width_um, height_nm):
+        need = 2.0 * tip.half_width_um(height_nm)
         out.append(
             Notice(
                 N.NARROW_FEATURE,
                 N.WARNING,
-                f"a stylus of radius {r:g} µm cannot reach the floor of a groove {width_um:.3g} µm"
-                f" wide and {height_nm:.4g} nm deep: depth and width are underestimated",
-                {"width_um": width_um, "tip_radius_um": r},
+                f"a stylus of {tip.describe()} cannot reach the floor of a groove"
+                f" {width_um:.3g} µm wide and {height_nm:.4g} nm deep (it needs {need:.3g} µm):"
+                " depth and width are underestimated",
+                {"width_um": width_um, "tip_radius_um": r, "needed_width_um": need},
             )
         )
     elif width_um < 3 * r:
@@ -1001,6 +1112,7 @@ def measure(
     *,
     k: float = 4.0,
     tip_radius_um: float = 2.0,
+    cone_angle_deg: float = DEFAULT_INSTRUMENT.cone_angle_deg,
 ) -> StepMeasurement:
     """Dispatch on the profile kind (from :func:`.edges.classify` or forced)."""
     if not eset.edges or kind == "none":
@@ -1050,7 +1162,16 @@ def measure(
                     )
                 ],
             )
-        m = measure_a1(x, z, eset, pair, kind=kind, k=k, tip_radius_um=tip_radius_um)
+        m = measure_a1(
+            x,
+            z,
+            eset,
+            pair,
+            kind=kind,
+            k=k,
+            tip_radius_um=tip_radius_um,
+            cone_angle_deg=cone_angle_deg,
+        )
         if len(eset.edges) > 2:
             m.notices.append(
                 Notice(

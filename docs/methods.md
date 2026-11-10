@@ -10,8 +10,9 @@ Rows of cells (text lines or worksheet rows) are scanned for numeric blocks of a
 10 rows and two columns. The text row above a block is its header; if it holds only
 units it is the unit row and the header is the row above. All other text rows are
 metadata (`key: value`, `key, value`, `key<TAB>value`). Scan parameters are recognised by
-generic words only (`force`, `radius`, `speed`, `length`, `points`, `date`) and converted
-to mg, µm and µm/s. No instrument-specific column name is assumed.
+generic words only (`force`, `radius`, `speed`, `length`, `points`, `date`, and `angle`
+next to `cone`, `stylus` or `tip`) and converted to mg, µm, µm/s and degrees. No
+instrument-specific column name is assumed.
 
 Column choice: the first lateral-looking column (`x`, `lateral`, `distance`, `position`,
 `scan length`…) is x; among height-looking columns (`z`, `height`, `profile`, `raw`…) a raw
@@ -67,7 +68,11 @@ reported (`TRANSITION_WIDENED`, info) and shown in the transition regions; a sid
 still bends at the limit, or that needed a quarter of its plateau or more, gives
 `TRANSITION_TAIL` (warning): the rest of the plateau is then probably still inside the
 tail. With automatic levelling the profile is levelled again with the wider transitions.
-`--no-widen` (GUI: *widen transitions until the plateaus are flat*) turns this off.
+On a plateau between two edges (the floor of a groove, the top of a ridge, a line of a
+periodic pattern) a block of the same length at the far end is left out of the reference
+line as well: the tail of the other edge would bend the line towards the tested block
+and hide it. `--no-widen` (GUI: *widen transitions until the plateaus are flat*) turns
+this off.
 
 Plateaus lie between edges, shortened by a margin of two stylus radii next to each edge.
 A plateau shorter than `max(3 r, 10 dx)` is dissolved: its two edges become one
@@ -134,11 +139,77 @@ Source for the wording: the ISO 5436 text as quoted by Song & Vorburger, *J. Res
 equivalent") was read in the public preview. Clause 7 of ISO 5436-1:2000 itself was not
 available.
 
-Stylus checks: a spherical tip of radius r reaches the floor of a rectangular groove of
-width W and depth d only if `(W/2)² ≥ 2 r d − d²` (d < r) or `W ≥ 2 r` (d ≥ r); otherwise
-`NARROW_FEATURE` says depth and width are underestimated. Grooves narrower than 3 r are
-flagged as shaped by the stylus. Real styli are cones with a rounded tip, so steep walls
-are traced worse than this estimate.
+Stylus checks: the stylus (below) reaches the floor of a rectangular groove of width W
+and depth d only if W is at least its width at that depth: `(W/2)² ≥ 2 r d − d²` while
+the sphere alone enters (`d ≤ r (1 − sin a)`, a the half angle of the cone), and
+`W/2 ≥ r cos a + (d − r (1 − sin a)) tan a` once the cone does. A 2 µm, 60° stylus needs
+8.1 µm to reach the floor of a 5 µm deep trench; the sphere alone, as in the first
+version, would need 4 µm. Otherwise `NARROW_FEATURE` says depth and width are
+underestimated; the recorded depth is used, which is at most the true one, so the check
+errs on the side of warning. Grooves narrower than 3 r are flagged as shaped by the
+stylus.
+
+**Levels that are not flat.** A1 takes the central third of the groove to be flat and the
+outer level to be straight. A quadratic is fitted to each (correlation of its residuals
+allowed for):
+
+* when the floor (or the top of a ridge) still rises towards the rims by more than four
+  standard errors and 0.5 % of the depth over the central third, and the same bend is
+  significant over the whole floor between the walls (tails grow towards the rims,
+  correlated roughness does not), `A1_BOTTOM_NOT_FLAT` says the tails of gently sloping
+  walls reach the central third and the depth is too small; the bend is added to
+  `u_tail`;
+* when the outer level bends by more than four standard errors and 1 % of the depth,
+  `A1_OUTER_CURVED` suggests that a bow is left in the profile (a 40 nm bow over a 1 mm
+  scan made a 100 nm groove read 8.9 nm too deep, with no warning in the first version;
+  a bow order of 2 removes it).
+
+### Stylus shape and the points it cannot touch
+
+The stylus is a cone of full angle `2a` (default 60°) ending in a sphere of radius r
+(default 2 µm) that meets the cone tangentially. At the lateral distance u from the apex
+its surface lies `d(u) = r − √(r² − u²)` above the apex for `|u| ≤ r cos a` and
+`d(u) = r (1 − sin a) + (|u| − r cos a) / tan a` beyond, so the cone only matters for
+features deeper than `r (1 − sin a)` (1 µm for 2 µm and 60°). The record is the apex
+height `t(x) = max_u [s(x + u) − d(u)]` (grey-scale dilation of the surface s). The
+erosion `r(x) = min_u [t(x + u) + d(u)]` is the highest surface consistent with the
+record: `s ≤ r ≤ t`, with equality where the stylus touched. A point is *reached* when,
+for some stylus position, it is the only place where the stylus touches r within a
+tolerance of three times the point-to-point noise (the certainty map of
+J. S. Villarrubia, *J. Res. NIST* **102**, 425 (1997), written here from that paper's
+description). A contact set no wider than a sphere resting on a flat within the tolerance
+counts as one point; on the straight cone flank only a single point counts, since a flank
+lying along a surface it shaped itself touches a whole stretch. Runs of fewer than three
+unreached points are noise and dropped; two unreached runs are joined when the few points
+between them lie no higher than their sides (the bottom of a V traced in a narrow trench,
+which the despiker may also have cut).
+
+Results: the regions are drawn hatched in the figures and shaded in the GUI, listed in
+the project file (`tip_check`) and reported as `TIP_UNREACHED` - info when the fitted
+levels do not use them (the foot of a steep wall), info with the recorded depth when the
+record rises on both sides (the floor of a dip narrower than the stylus: that depth is
+only a lower bound), and a warning when more than 2 % of the points of a fitted plane lie
+in them (that level is only an upper bound). A wall as steep as the cone flank gives
+`TIP_LIMITED_WALL` (info: its recorded shape and width are the stylus's), a wall steeper
+than the assumed flank a warning (the mounted stylus is sharper than assumed). When the
+profile is deeper than `r (1 − sin a)` and the angle is not in the file,
+`CONE_ANGLE_DEFAULT` says 60° was assumed. For roughness the share of the evaluation
+length that the stylus did not touch is reported (`TIP_UNREACHED` above 1 %); ISO 21920
+evaluates the profile as traced, so the parameters are not corrected.
+
+Source of the default: 60° is the usual nominal cone angle of contact roughness styli
+(90° the other common one; Keyence's overview of contact-type roughness testers, read
+2026-11-10), and one DektakXT facility lists 60° for its 2 µm stylus (NUS, read
+2026-11-10). The angle of the stylus at the Incheon facility was not found; set it with
+`--cone-angle` or in the GUI.
+
+On synthetic data (`examples/validate_synthetic.py`) the reach check errs on the safe
+side: next to a vertical 5 µm step it finds 3.5 of the 4.04 µm hidden foot (the tolerance
+takes the rest), on random surfaces that leave 55 % (3.6 %) of the points untouched it
+finds 43 % (2.1 %), with 0.5 % (0.3 %) of the points called hidden although touched, and
+on noisy flat or gently rough surfaces it finds nothing. For 3 µm deep trenches 4–5.5 µm
+wide the floor is flagged in every case and the recorded depth matches the hanging stylus
+within 2 nm; a 7 µm trench, which the stylus reaches, is not flagged.
 
 ### Uncertainty (single scan, k = 1)
 
@@ -149,7 +220,9 @@ are traced worse than this estimate.
   excluded gap between the two fitted regions when the planes are not parallel.
 * `u_tail`: only next to a widened transition - the mean offset towards the other level
   that the block next to the edge (a tenth of the plane) still shows, summed over both
-  sides: the part of the tail that the widening test could not resolve.
+  sides: the part of the tail that the widening test could not resolve. For an A1 depth
+  the offsets of the four sides are halved (one line spans both sides of a level) and
+  summed, and the bend of a floor that is not flat (above) is added.
 * `u = √(u_fit² + u_slope² + u_tail²)`.
 
 **Autocorrelation time.** Removing the P parameters of the fitted lines from n points
@@ -170,7 +243,12 @@ is well calibrated for white noise; with roughness correlated over 5 and 20 µm 
 the errors fall within 2u (95 % expected). Planes with fewer than 30 independent points
 carry `CORRELATED_RESIDUALS`: there the uncertainty rests on the assumed shape of the
 correlation. For gently running-out edges `u_tail` keeps 93–97 % of the errors within
-2u up to 200 µm wide walls in a 2 mm scan; wider edges carry `TRANSITION_TAIL`.
+2u up to 200 µm wide walls in a 2 mm scan; wider edges carry `TRANSITION_TAIL`. For A1
+grooves with walls 100–250 µm wide (W 400–600 µm) it raises the share within 2u from
+7–83 % to 100 %; where the floor never becomes flat the depth still reads 1–1.4 % low,
+with `A1_BOTTOM_NOT_FLAT` on 22–28 of 30 scans. For grooves with roughness correlated
+over 20 µm only 80 % of the errors fall within 2u (as in the first version): the central
+third holds only a few correlation lengths.
 
 ### Range checks
 

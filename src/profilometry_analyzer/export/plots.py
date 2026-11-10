@@ -50,6 +50,7 @@ PLANE_FILL = "#2a78d6"
 INNER_FILL = "#1baf7a"
 EXCLUDED_FILL = "#bdbdbd"
 BURR_FILL = "#eda100"
+UNREACHED_FILL = "#6250d6"
 MM = 1.0 / 25.4
 
 # Journal-style figure sizes in millimetres (width, height).
@@ -458,6 +459,19 @@ def plot_step(
         for r in m.regions_um.get("transition", []):
             _span(ax, r, sx, EXCLUDED_FILL, 0.35, "transition (excluded)" if first else None)
             first = False
+        reach = getattr(result, "tip_check", None)
+        for i, r in enumerate(reach.unreached_um if reach is not None else []):
+            ax.axvspan(
+                r[0] * sx,
+                r[1] * sx,
+                facecolor="none",
+                edgecolor=UNREACHED_FILL,
+                hatch="////",
+                lw=0,
+                alpha=0.6,
+                zorder=0,
+                label="not touched by the stylus" if i == 0 else None,
+            )
         ax.plot(x, z, color=RAW, lw=c.lw, label="levelled", zorder=2)
         bad = ~p.valid
         if bad.any():

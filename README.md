@@ -19,11 +19,12 @@ profilometers (written for a Bruker DektakXT-E) and generic two-column tables.
 
 | Task | Method |
 |---|---|
-| Read | CSV / TXT / TSV / xlsx; header and metadata lines found automatically; units from the header (Å, nm, µm, mm) or **assumed with a warning**; stylus force, scan length, speed and stylus radius kept when the file has them. The values as read are never changed. |
+| Read | CSV / TXT / TSV / xlsx; header and metadata lines found automatically; units from the header (Å, nm, µm, mm) or **assumed with a warning**; stylus force, scan length, speed, stylus radius and cone angle kept when the file has them. The values as read are never changed. |
 | Level | Manual: two reference regions (like the R and M cursors of the instrument software), on one level or on separate levels. Automatic: edges masked by a smoothed derivative, then a robust (Huber or RANSAC) line shared by all plateaus with one offset per plateau. Bow: optional polynomial (order 2–6), a separate, recorded step. |
-| Step height | Edge detection from the smoothed derivative against a noise threshold; classification into film edge, groove (scratch), ridge (stripe), staircase, periodic lines. Film edge: a line on each plateau, transition zone (default two stylus radii) excluded, height at the half-height point. **Wide, gently running-out edges** (tapered or shadowed film edges) are found with wider derivative smoothings, and a transition is widened while the plateau next to it still runs towards the other level. Groove and ridge: **ISO 5436-1 type A1** evaluation. Raised burrs beyond k·σ are excluded and reported. |
-| Uncertainty | From the regression residuals, inflated by the autocorrelation time of the residuals of all planes pooled and corrected for the fitted lines; from the slope difference of the two planes; and, next to a widened transition, from the tail the test could not resolve. Several scans: mean, standard deviation and n per sample. |
-| Roughness | ISO 21920-2 Ra, Rq, Rz, Rp, Rv, Rt, Rsk, Rku, Rsm after an ISO 16610-21 Gaussian filter (λs and λc); default cut-offs from the ISO 21920-3 setting classes; warnings for coarse sampling and short evaluation lengths. |
+| Step height | Edge detection from the smoothed derivative against a noise threshold; classification into film edge, groove (scratch), ridge (stripe), staircase, periodic lines. Film edge: a line on each plateau, transition zone (default two stylus radii) excluded, height at the half-height point. **Wide, gently running-out edges** (tapered or shadowed film edges) are found with wider derivative smoothings, and a transition is widened while the plateau next to it still runs towards the other level. Groove and ridge: **ISO 5436-1 type A1** evaluation, with warnings when the floor or the outer level is not flat (tails of sloping walls, a bow left in the scan). Raised burrs beyond k·σ are excluded and reported. |
+| Stylus | A sphere on a cone (default 2 µm, 60°). The points the stylus could not touch - the foot of steep walls, the floor of grooves narrower than the stylus, deep valleys - are found from the record (morphological reconstruction and certainty map), drawn in the figures and reported; the narrow-groove check uses the cone. |
+| Uncertainty | From the regression residuals, inflated by the autocorrelation time of the residuals of all planes pooled and corrected for the fitted lines; from the slope difference of the two planes; and, next to a widened transition or on an A1 floor that still bends, from the tail the test could not resolve. Several scans: mean, standard deviation and n per sample. |
+| Roughness | ISO 21920-2 Ra, Rq, Rz, Rp, Rv, Rt, Rsk, Rku, Rsm after an ISO 16610-21 Gaussian filter (λs and λc); default cut-offs from the ISO 21920-3 setting classes; warnings for coarse sampling and short evaluation lengths; the share of the evaluation length the stylus did not touch. |
 | Film stress | Stoney equation from the curvature of quadratic fits to long scans before and after deposition; substrate table (Si(100), Si(111), glasses) with sources, editable. |
 | Batch | Every scan of a folder, grouped by sample from the file name: n, mean, SD, SE, CV and the 95 % confidence interval of the mean (Student t) per sample; column chart with error bars and the individual scans. |
 | Output | CSV, xlsx, JSON project file (`verify` repeats the analysis and compares), Origin-ready worksheets, and publication figures (PNG / TIFF / SVG / PDF) - see [Figures and worksheets](#figures-and-worksheets). |
@@ -35,7 +36,8 @@ example `UNIT_ASSUMED`, `NARROW_FEATURE` (structure narrower than the stylus can
 `SMALL_STEP` (near the 20 nm lower end of the vertical range), `SOFT_FILM_HIGH_FORCE`
 (soft film scanned with more than 3 mg), `BURR_EXCLUDED`, `NONPARALLEL_PLANES`,
 `CORRELATED_RESIDUALS`, `TRANSITION_TAIL` (the plateau is still inside the tail of a very
-wide edge), `EVALUATION_TOO_SHORT`, `SAMPLING_TOO_COARSE`, `STONEY_THICK_FILM`,
+wide edge), `TIP_UNREACHED` (points the stylus did not touch), `A1_OUTER_CURVED` (a bow
+left in the profile under a groove), `EVALUATION_TOO_SHORT`, `SAMPLING_TOO_COARSE`, `STONEY_THICK_FILM`,
 `CURVATURE_CHANGE_NOT_SIGNIFICANT`. The full list is in
 [`notices.py`](src/profilometry_analyzer/notices.py).
 
@@ -135,6 +137,11 @@ Details and references: [`docs/methods.md`](docs/methods.md).
   than 3 standard errors towards the other level, it is added to the transition
   (`TRANSITION_WIDENED`), at most half the plateau. A transition that takes a quarter of
   a plateau or more gives `TRANSITION_TAIL`. `--no-widen` turns this off.
+* **Stylus** – a sphere of radius r on a cone of full angle 2a; the cone matters below
+  `r (1 − sin a)`. The record is the dilation of the surface by the stylus; its erosion
+  is the highest surface consistent with it, and a point counts as touched when some
+  stylus position touches it alone within three times the noise (Villarrubia's
+  certainty map, J. Res. NIST 102, 425 (1997)). `--cone-angle`, `--no-tip-check`.
 * **Uncertainty** – the residuals of a line fitted over a plane only a few correlation
   lengths long decorrelate too fast. The autocorrelation of all planes' residuals is
   pooled, corrected for the fitted parameters (`ρ = ρ̂(1 − f) + f`, `f = P·τ/n`) and
@@ -163,7 +170,7 @@ Details and references: [`docs/methods.md`](docs/methods.md).
 Run `python examples/validate_synthetic.py` and `pytest` to repeat these numbers.
 
 **Synthetic data.** Profiles with a known step, tilt, bow, noise, burrs and spikes, traced
-with a 2 µm spherical stylus; 30 noise realisations per case, default settings:
+with a 2 µm stylus on a 60° cone; 30 noise realisations per case, default settings:
 
 | case | true (nm) | mean error | max abs error | share with error < 2u |
 |---|---|---|---|---|
@@ -203,6 +210,40 @@ is so wide that the plateaus never become flat inside the scan (400 µm in 2 mm)
 height still reads about 0.75 % low; every such scan carries `TRANSITION_TAIL`. Scan
 farther onto both levels in that case.
 
+**A1 grooves with gently sloping walls** (100 nm deep, logistic walls, 2 mm scan, noise
+1 nm, 30 realisations): `u_tail` from the widened transitions and from a floor that
+still bends brings the errors within 2u; where the walls' tails reach the central third
+the depth still reads 1–1.4 % low and `A1_BOTTOM_NOT_FLAT` says so.
+
+| groove | mean error | max abs | mean u_tail | < 2u without u_tail | < 2u with | `A1_BOTTOM_NOT_FLAT` |
+|---|---|---|---|---|---|---|
+| W 400 µm, walls 100 µm | −0.046 | 0.233 | 0.163 | 83 % | 100 % | 0/30 |
+| W 400 µm, walls 150 µm | −1.009 | 1.086 | 1.475 | 7 % | 100 % | 28/30 |
+| W 600 µm, walls 250 µm | −1.408 | 2.042 | 1.859 | 50 % | 100 % | 22/30 |
+
+A groove (W 200 µm, 100 nm) in a scan with a 40 nm bow reads +8.879 nm with bow order 1
+- the first version gave no warning; now every scan carries `A1_OUTER_CURVED` - and
++0.009 nm with bow order 2 (no warning).
+
+**Stylus shape** (2 µm radius, 60° cone; noise 1 nm for steps, 0.5 nm otherwise):
+
+| case | theory | found |
+|---|---|---|
+| hidden foot next to a vertical 1 µm step | 1.73 µm | 1.64 ± 0.05 µm |
+| hidden foot next to a vertical 5 µm step | 4.04 µm | 3.54 ± 0.05 µm (`TIP_LIMITED_WALL` 30/30) |
+| 3 µm deep trench 4 µm wide: recorded depth | 1464 nm | 1466 nm, floor flagged 10/10 |
+| 3 µm deep trench 5 µm wide | 2330 nm | 2332 nm, flagged 10/10 |
+| 3 µm deep trench 5.5 µm wide | 2763 nm | 2765 nm, flagged 10/10 |
+| 3 µm deep trench 7 µm wide (reachable) | 3000 nm | not flagged (0/10) |
+| rough surface Rq 100 nm, correlation 0.3 µm: points not touched | 55.4 % | 43.4 % (0.5 % wrongly) |
+| rough surface Rq 60 nm, correlation 0.5 µm | 3.6 % | 2.1 % (0.3 % wrongly) |
+| rough surface Rq 50 nm, correlation 1 µm | 0 % | 0 % |
+
+The step heights themselves are not affected (mean errors −0.005 to −0.004 nm). The
+check errs on the side of calling points touched: next to a 100 nm step the hidden foot
+(0.62 µm, never deeper than 100 nm) lies mostly inside the noise tolerance and is not
+reported.
+
 **Analytical cases.**
 
 * Sine of amplitude A = 10 nm: Ra = 6.36619 nm (2A/π = 6.36620), Rq = 7.07101 nm
@@ -217,7 +258,7 @@ from the Incheon National University core facility (Bruker DEKTAK XT-E, CSV and 
 possible OPDx) and the step and roughness values Vision64 reported for the same scans
 has not been done. Until it is, do not treat the results as validated for real data.
 
-**Quality.** `pytest` (131 tests), `ruff` and `mypy` pass (locally on Python 3.11 with
+**Quality.** `pytest` (152 tests), `ruff` and `mypy` pass (locally on Python 3.11 with
 numpy 2.4 and Python 3.12 with numpy 2.5); CI runs on Windows, macOS and Linux with
 Python 3.11, 3.12 and 3.13.
 
@@ -237,6 +278,10 @@ repeatability 5 Å (1σ) on 1 µm, stylus force 1–15 mg, scan speed 2–200 µ
 stylus radius is listed as 1.25 µm on the equipment page and 2 µm in the facility's 2022
 leaflet; **2 µm is the default** because it widens the excluded edge zones and raises
 more narrow-feature warnings. A radius in the file or `--tip-radius` takes precedence.
+The cone angle is not listed by the facility; **60° is the default** (the usual nominal
+angle of roughness styli, and the angle one DektakXT facility lists for its 2 µm
+stylus). It only matters for features deeper than half the stylus radius; set it with
+`--cone-angle`.
 
 ## Desktop application
 

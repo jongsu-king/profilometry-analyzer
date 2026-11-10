@@ -2,6 +2,31 @@
 
 All notable changes are listed here. Versions follow [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+- Stylus shape: a sphere on a cone (default 2 µm and 60°; `--cone-angle`, GUI field,
+  `Stylus Cone Angle` in the file metadata). The narrow-groove check uses the cone: a
+  2 µm, 60° stylus needs 8.1 µm to reach the floor of a 5 µm deep trench, not the 4 µm
+  of a sphere alone. Synthetic profiles are traced with the cone too (it only matters
+  below `r (1 - sin 30°)`, 1 µm for 2 µm; the earlier synthetic results are unchanged).
+- Points the stylus could not touch: the record is eroded by the stylus (the highest
+  surface consistent with it) and Villarrubia's certainty map marks what was touched.
+  `TIP_UNREACHED` reports the foot of steep walls, the floor of dips narrower than the
+  stylus (with the recorded depth, a lower bound) and warns when a fitted plane uses such
+  points; the regions are hatched in the figures, shaded in the GUI and stored in the
+  project file (`tip_check`). Roughness reports the untouched share of the evaluation
+  length. `TIP_LIMITED_WALL` (a wall as steep as the cone flank, or steeper than the
+  assumed one), `CONE_ANGLE_DEFAULT`. `--no-tip-check` and a GUI check box turn it off.
+- A1 grooves and ridges: `u_tail` next to widened transitions; a floor that still bends
+  towards the rims gives `A1_BOTTOM_NOT_FLAT` and its bend enters `u_tail` (W 400 µm,
+  150 µm walls: 7 % -> 100 % of the errors within 2u); a curved outer level gives
+  `A1_OUTER_CURVED` (a 40 nm bow made a 100 nm groove read 8.9 nm too deep without
+  warning).
+- Widening: on a plateau between two edges the reference line leaves out both ends, so
+  that the other edge's tail does not hide this one.
+- The GUI roughness analysis uses the stylus radius and angle set in the panel.
+- 152 tests.
+
 ## [0.1.0] - 2026-11-10
 
 First version.

@@ -306,6 +306,19 @@ class ProfilePlot(QWidget):
             self._band(r, rgba(s.series[2], 40))
         for r in m.regions_um.get("transition", []):
             self._band(r, rgba(s.background, 45))
+        reach = getattr(res, "tip_check", None)
+        for i, r in enumerate(reach.unreached_um if reach is not None else []):
+            self._band(r, rgba(s.series[6 % len(s.series)], 70))
+            if i == 0:
+                self.legend.addItem(
+                    pg.BarGraphItem(
+                        x=[0],
+                        height=[0],
+                        width=0,
+                        brush=pg.mkBrush(*rgba(s.series[6 % len(s.series)], 120)),
+                    ),
+                    "not touched by the stylus",
+                )
         self.main.plot(
             p.x_um * sx,
             z_nm * sz,

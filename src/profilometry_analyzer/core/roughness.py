@@ -37,11 +37,13 @@ from typing import Any
 import numpy as np
 
 from .. import notices as N
+from ..instrument import DEFAULT_INSTRUMENT
 from ..notices import Notice
 from ..profile import Profile
 from .edges import detect_edges
 from .filters import kernel_points, mean_line
 from .stats import uniform_grid
+from .tip import Tip, check_tip
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,9 @@ class RoughnessResult:
     sections: list[dict[str, float]] = field(default_factory=list)
     iterations: list[dict[str, Any]] = field(default_factory=list)
     notices: list[Notice] = field(default_factory=list)
+    stylus: dict[str, Any] = field(default_factory=dict)
+    """Stylus shape used for the reach check and the share of the evaluation length in
+    valleys it did not touch (:mod:`.tip`)."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -148,6 +153,7 @@ class RoughnessResult:
             "sections": list(self.sections),
             "iterations": list(self.iterations),
             "rsm_discrimination": "ISO 4287 convention (10 % of Rz, 1 % of section length)",
+            "stylus": dict(self.stylus),
             "notices": [n.to_dict() for n in self.notices],
         }
 
@@ -466,6 +472,32 @@ def roughness(profile: Profile, settings: RoughnessSettings | None = None) -> Ro
             )
         )
     tip = profile.scan.tip_radius_um
+    stylus = Tip(
+        tip or DEFAULT_INSTRUMENT.tip_radius_um,
+        profile.scan.cone_angle_deg
+        if profile.scan.cone_angle_deg is not None
+        else DEFAULT_INSTRUMENT.cone_angle_deg,
+    )
+    reach = check_tip(xu, p, stylus)
+    hidden = 100.0 * reach.unreached_fraction(res["ev"])
+    stylus_info = {
+        **stylus.to_dict(),
+        "radius_source": "file" if tip else "instrument default",
+        "unreached_percent": hidden,
+    }
+    if hidden > 1.0:
+        notes.append(
+            Notice(
+                N.TIP_UNREACHED,
+                N.INFO,
+                f"{hidden:.2g} % of the evaluation length lies in valleys the stylus"
+                f" ({stylus.describe()}) did not touch: the parameters describe the profile"
+                " as traced by this stylus (which is what ISO 21920 evaluates); the surface"
+                " itself is deeper there, so Rv, Rz and Rt are lower than an ideal point would"
+                " give",
+                {"unreached_percent": hidden, "stylus": stylus.to_dict()},
+            )
+        )
     if tip and ls_used and tip > ls_used:
         notes.append(
             Notice(
@@ -510,4 +542,5 @@ def roughness(profile: Profile, settings: RoughnessSettings | None = None) -> Ro
         sections=res["rows"],
         iterations=iterations,
         notices=N.unique(notes),
+        stylus=stylus_info,
     )
